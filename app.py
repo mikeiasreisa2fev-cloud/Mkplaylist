@@ -7,8 +7,8 @@ import uuid
 
 app = Flask(__name__)
 
-# Configurações do Servidor
-BASE_URL = "https://ycineflix.tudo30.shop/wp-json/xui-pflix/v1"
+# Configurações do Servidor - Pobreflix é o motor principal
+BASE_URL = "https://app.pobreflix2.site/wp-json/xui-pflix/v1"
 USER_AGENT = "okhttp/4.12.0"
 APP_ID = "site.speedflix"
 
@@ -17,10 +17,8 @@ class SpeedFlixAPI:
         self.token = None
         self.device_id = str(uuid.uuid4()).replace('-', '')[:16]
 
-    def login(self, force=False):
-        """Obtém o token de acesso simulando o app original."""
-        if self.token and not force:
-            return self.token
+    def login(self):
+        """Obtém o token de acesso Bearer simulando o app original."""
         try:
             payload = {
                 "username": f"guest_{self.device_id[:8]}",
@@ -29,10 +27,12 @@ class SpeedFlixAPI:
                 "model": "Samsung SM-G998B",
                 "version": "13"
             }
+            # Tenta login no domínio principal
             r = requests.post(f"{BASE_URL}/auth/login", json=payload, 
                              headers={"User-Agent": USER_AGENT}, timeout=10)
             if r.status_code == 200:
-                self.token = r.json().get("data", {}).get("token") or r.json().get("token")
+                data = r.json()
+                self.token = data.get("data", {}).get("token") or data.get("token")
                 return self.token
         except: pass
         return None
@@ -48,25 +48,31 @@ api = SpeedFlixAPI()
 
 @app.route("/")
 def index():
-    return "Proxy SpeedFlix Ativo. Use /playlist.m3u no TiviMate."
+    return "<h1>Proxy SpeedFlix Ativo</h1><p>Playlist: /playlist.m3u</p>"
 
 @app.route("/playlist.m3u")
 def playlist():
-    host = request.host_url # Já termina com '/'
+    host = request.host_url
     m3u = ["#EXTM3U"]
     
-    # Sufixo para o TiviMate usar os headers corretos no proxy e no vídeo
+    # Headers para o TiviMate enviar ao Proxy e ao Stream final
+    # O sufixo com '|' é o padrão que o TiviMate entende
     suffix = f"|User-Agent={USER_AGENT}&X-Requested-With={APP_ID}"
+    token = api.login()
+    if token:
+        suffix += f"&Authorization=Bearer {token}"
     
     for sid in [1, 2, 3]:
-        try:
-            # Busca canais (Pega 2 páginas de 100 para ser rápido e não dar erro 500)
-            for page in range(1, 3):
+        page = 1
+        while True:
+            try:
                 r = requests.get(f"{BASE_URL}/channels", 
                                 params={"server_id": sid, "per_page": 100, "page": page},
                                 headers=api.get_headers(), timeout=15)
                 if r.status_code != 200: break
-                items = r.json().get("data", {}).get("items") or r.json().get("items") or []
+                
+                data = r.json()
+                items = data.get("data", {}).get("items") or data.get("items") or []
                 if not items: break
                 
                 for ch in items:
@@ -76,19 +82,26 @@ def playlist():
                     logo = ch.get("image") or ""
                     
                     m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{group}",{name}')
-                    # Link modificado para aceitar o sufixo do TiviMate
+                    # A rota usa <path:cid> para aceitar o sufixo do TiviMate sem dar 404
                     m3u.append(f"{host}stream/{sid}/{cid}{suffix}")
-        except: continue
-        
+                
+                meta = data.get("data", {}).get("meta") or data.get("meta") or {}
+                if page >= int(meta.get("total_pages", 1)): break
+                page += 1
+                time.sleep(0.1) # Evita bloqueio por excesso de requests
+            except: break
+            
     return Response("\n".join(m3u), mimetype="text/plain")
 
-@app.route("/stream/<int:sid>/<cid>")
+@app.route("/stream/<int:sid>/<path:cid>")
 def stream_proxy(sid, cid):
-    # O TiviMate envia o ID colado com os headers, aqui nós limpamos
+    # Limpa o ID do canal (o TiviMate manda o ID + Suffix no path)
+    # Exemplo: cid="123|User-Agent=..." -> clean_cid="123"
     clean_cid = cid.split('|')[0].split('?')[0]
     
     try:
         headers = api.get_headers()
+        # O parâmetro 't' (timestamp) é obrigatório para o link funcionar
         r = requests.get(f"{BASE_URL}/channels/{clean_cid}/stream", 
                         params={"server_id": sid, "t": int(time.time())},
                         headers=headers, timeout=10)
@@ -98,21 +111,18 @@ def stream_proxy(sid, cid):
             video_url = data.get("stream_url") or data.get("free_url")
             
             if video_url:
-                # O SEGREDO: Injetar o token de autorização no link de REDIRECIONAMENTO
-                # Isso faz o TiviMate abrir o vídeo com a chave correta.
-                token = api.login()
-                final_url = f"{video_url}|User-Agent={USER_AGENT}&X-Requested-With={APP_ID}"
-                if token:
-                    final_url += f"&Authorization=Bearer%20{token}"
-                
-                return redirect(final_url)
-    except: pass
-    return "Erro", 404
+                # TiviMate já enviará os headers configurados no M3U para este redirect
+                return redirect(video_url)
+        
+        return f"Erro na API SpeedFlix: {r.status_code}", 404
+    except Exception as e:
+        return f"Erro de Conexão: {str(e)}", 500
 
 @app.route("/epg.xml")
 def epg():
     return Response('<?xml version="1.0" encoding="UTF-8"?><tv></tv>', mimetype="application/xml")
 
 if __name__ == "__main__":
+    # Render usa porta 10000 por padrão
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
