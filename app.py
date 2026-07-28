@@ -1,11 +1,9 @@
 from flask import Flask, Response, redirect, request
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
+import undetected_chromedriver as uc
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import time
 import os
@@ -20,227 +18,142 @@ SERVERS = [
     {"id": 3, "url": "https://app.pobreflix2.site/canais/categorias/?thema=1&server=speed-3", "name": "SPEED-3"},
 ]
 
-# 🔧 CONFIGURAÇÃO OTIMIZADA PARA RENDER
+# 🔧 NAVEGADOR CAMUFLADO (NÃO DETECTADO COMO BOT)
 def criar_driver():
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled") # 🔑 SEGREDO
+    chrome_options.add_argument("--start-maximized")
     chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-images") # 🚀 Carrega mais rápido
-    chrome_options.add_argument("--blink-settings=imagesEnabled=false")
-    chrome_options.add_argument("--window-size=1280,720")
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0 Safari/537.36")
-    chrome_options.page_load_strategy = 'eager' # Não espera recursos inúteis
-    
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=chrome_options
+    chrome_options.add_argument("--disable-popup-blocking")
+
+    driver = uc.Chrome(
+        options=chrome_options,
+        headless=True,
+        use_subprocess=False
     )
-    driver.set_page_load_timeout(25)
-    driver.implicitly_wait(8)
+    driver.set_page_load_timeout(30)
     return driver
 
 def log_debug(msg):
-    print(f"[DEBUG {time.strftime('%H:%M:%S')}] {msg}")
+    print(f"[LOG {time.ctime()}] {msg}")
 
-def pegar_conteudo_seguro(url):
-    """Baixa página com espera explícita e tratamento de erros"""
+def pegar_pagina(url):
     driver = None
     try:
         driver = criar_driver()
-        log_debug(f"Acessando: {url[:70]}...")
+        log_debug(f"Acessando: {url}")
         driver.get(url)
         
-        # ✅ ESPERA INTELIGENTE: Espera o body + conteúdo dinâmico
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        # Espera o conteúdo realmente aparecer
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "body, main, .container"))
         )
-        time.sleep(3) # Segurança extra para JS
+        time.sleep(4) # Garante JS total
         
-        html = driver.page_source
-        log_debug(f"✓ Página carregada: {len(html)} bytes")
-        return html
+        return driver.page_source
     except Exception as e:
-        log_debug(f"✗ Falha: {str(e)}")
+        log_debug(f"FALHA: {str(e)}")
         return ""
     finally:
         if driver:
             try: driver.quit()
             except: pass
 
-def extrair_categorias(html_base):
-    """Seletores ajustados para a estrutura real do site"""
-    soup = BeautifulSoup(html_base, "html.parser")
-    cats = []
-    
-    # 🔍 TENTA VÁRIOS SELETORES (compatibilidade total)
-    seletores = [
-        "a[href*='categorias']",
-        ".category-item a",
-        ".list-group-item",
-        "div.card a",
-        ".menu-item a",
-        "a[class*='cat']"
-    ]
-    
-    for sel in seletores:
-        elementos = soup.select(sel)
-        if elementos:
-            log_debug(f"Encontrados {len(elementos)} categorias com seletor: {sel}")
-            for el in elementos:
-                nome = el.get_text(strip=True)
-                href = el.get("href")
-                if nome and href and not "javascript:" in href:
-                    if not href.startswith("http"):
-                        href = "https://app.pobreflix2.site" + href
-                    cats.append({"nome": nome, "url": href})
-            break
-    return cats
-
-def extrair_canais_da_categoria(html_cat):
-    soup = BeautifulSoup(html_cat, "html.parser")
-    canais = []
-    
-    seletores_canais = [
-        "a[href*='canal']",
-        ".channel-link",
-        ".video-item a",
-        ".card-body a",
-        ".item-card a",
-        "div.col a"
-    ]
-    
-    for sel in seletores_canais:
-        items = soup.select(sel)
-        if items:
-            log_debug(f"→ {len(items)} canais encontrados")
-            for item in items:
-                nome = item.get_text(strip=True)
-                href = item.get("href")
-                if not nome or not href or len(nome) < 2:
-                    continue
+def extrair_cats(html):
+    soup = BeautifulSoup(html, "html.parser")
+    r = []
+    for sel in ["a[href*='categorias']", ".category a", ".list-group a", "div.card a"]:
+        for a in soup.select(sel):
+            nome = a.get_text(strip=True)
+            href = a.get("href")
+            if nome and href and not "javascript" in href:
                 if not href.startswith("http"):
                     href = "https://app.pobreflix2.site" + href
-                
-                logo = ""
-                img = item.find("img")
-                if img:
-                    logo = img.get("data-src") or img.get("src") or ""
-                    if logo and not logo.startswith("http"):
-                        logo = "https://app.pobreflix2.site" + logo
-                canais.append({"nome": nome, "url": href, "logo": logo})
-            break
-    return canais
+                r.append({"nome": nome, "url": href})
+        if r: break
+    return r
 
-def buscar_link_stream(url_canal):
-    html = pegar_conteudo_seguro(url_canal)
-    if not html: return None
-    
-    # Padrões de busca de stream
-    patterns = [
-        r'["\'](https?://[^"\']+\.m3u8[^"\']*)["\']',
-        r'streamUrl\s*:\s*["\']([^"\']+)["\']',
-        r'stream_url\s*[=:]\s*["\']([^"\']+)["\']',
-        r'source\s*src=["\']([^"\']+)["\']',
-        r'file\s*:\s*["\']([^"\']+\.mp4[^"\']*)["\']'
-    ]
-    
-    for p in patterns:
-        m = re.search(p, html, re.I)
-        if m:
-            link = m.group(1)
-            if link:
-                log_debug(f"✓ Stream encontrado: {link[:60]}...")
-                return link
+def extrair_canais(html):
+    soup = BeautifulSoup(html, "html.parser")
+    r = []
+    for sel in ["a[href*='canal']", ".channel-item a", ".video-card a", ".item a"]:
+        for a in soup.select(sel):
+            nome = a.get_text(strip=True)
+            href = a.get("href")
+            if not nome or len(nome) < 3 or not href: continue
+            if not href.startswith("http"):
+                href = "https://app.pobreflix2.site" + href
+            img = a.find("img")
+            logo = img.get("data-src") or img.get("src", "") if img else ""
+            if logo and not logo.startswith("http"):
+                logo = "https://app.pobreflix2.site" + logo
+            r.append({"nome": nome, "url": href, "logo": logo})
+        if r: break
+    return r
+
+def achar_stream(url):
+    h = pegar_pagina(url)
+    if not h: return None
+    for p in [r'https?://[^\s"\']+\.m3u8[^\s"\']*', r'stream_url\s*[:=]\s*["\']([^"\']+)["\']']:
+        m = re.search(p, h, re.I)
+        if m: return m.group(0) if isinstance(m.group(0), str) else m.group(1)
     return None
 
-# 📱 ROTAS DA APLICAÇÃO
+# 📱 ROTAS
 @app.route("/")
 def home():
-    return """
-    <h1>🔧 Proxy Diagnóstico Pobreflix</h1>
-    <ul>
-        <li><a href='/teste-simples'>🔍 Teste de Leitura</a></li>
-        <li><a href='/playlist.m3u'>📺 Playlist M3U</a></li>
-        <li><a href='/epg.xml'>📅 EPG</a></li>
-    </ul>
-    <p>Verifique os logs do Render para detalhes de execução!</p>
-    """
+    return "<h1>✅ Proxy Anti-Bloqueio Ativo</h1><p>Teste: <a href='/teste'>/teste</a> | Playlist: <a href='/playlist.m3u'>/playlist.m3u</a></p>"
 
-@app.route("/teste-simples")
+@app.route("/teste")
 def teste():
-    res = []
+    saida = []
     for srv in SERVERS:
-        res.append(f"\n===== {srv['name']} =====")
-        html = pegar_conteudo_seguro(srv["url"])
+        saida.append(f"\n=== {srv['name']} ===")
+        html = pegar_pagina(srv["url"])
         if not html:
-            res.append("❌ Não foi possível carregar")
+            saida.append("❌ Falha ao carregar")
             continue
-        res.append(f"✅ HTML carregado: {len(html)} bytes")
-        categorias = extrair_categorias(html)
-        res.append(f"📁 Categorias: {len(categorias)}")
-        for cat in categorias[:3]:
-            res.append(f"  ↳ {cat['nome']}")
-    return Response("\n".join(res), mimetype="text/plain")
+        saida.append(f"✅ OK: {len(html)} bytes")
+        cats = extrair_cats(html)
+        saida.append(f"📁 Categorias: {len(cats)}")
+        for c in cats[:3]: saida.append(f"   → {c['nome']}")
+    return Response("\n".join(saida), mimetype="text/plain")
 
 @app.route("/playlist.m3u")
 def playlist():
     host = request.host_url
-    m3u = ["#EXTM3U\n#EXT-X-VERSION:3\n#EXT-IMPORTANT: A primeira carga demora"]
+    m3u = ["#EXTM3U\n#EXT-X-VERSION:3"]
     total = 0
-
-    for servidor in SERVERS:
-        log_debug(f"\n=== PROCESSANDO {servidor['name']} ===")
-        html_principal = pegar_conteudo_seguro(servidor["url"])
-        if not html_principal:
-            m3u.append(f"# ERRO: Falha ao ler {servidor['name']}")
-            continue
-
-        categorias = extrair_categorias(html_principal)
-        if not categorias:
-            m3u.append(f"# AVISO: Sem categorias em {servidor['name']}")
-            continue
-
-        for cat in categorias[:15]: # Limite segurança
-            html_cat = pegar_conteudo_seguro(cat["url"])
-            if not html_cat: continue
-            
-            canais = extrair_canais_da_categoria(html_cat)
+    for srv in SERVERS:
+        html = pegar_pagina(srv["url"])
+        if not html: continue
+        cats = extrair_cats(html)
+        for cat in cats[:12]:
+            hcat = pegar_pagina(cat["url"])
+            if not hcat: continue
+            canais = extrair_canais(hcat)
             for ch in canais:
-                m3u.append(
-                    f'#EXTINF:-1 tvg-id="s{servidor["id"]}_{total}" '
-                    f'tvg-logo="{ch["logo"]}" group-title="{cat["nome"].upper()} [{servidor["name"]}]",{ch["nome"]}'
-                )
-                m3u.append(f'{host}stream/{servidor["id"]}/{total}?u={ch["url"]}')
+                m3u.append(f'#EXTINF:-1 tvg-logo="{ch["logo"]}" group-title="{cat["nome"]} [{srv["name"]}]",{ch["nome"]}')
+                m3u.append(f"{host}stream/{srv['id']}/{total}?u={ch['url']}")
                 total += 1
-
     if total == 0:
-        m3u.append("\n# ❌ NENHUM CANAL ENCONTRADO")
-        m3u.append("# Acesse /teste-simples para ver o que está acontecendo")
-        m3u.append("# Verifique logs no Render")
-
-    log_debug(f"✅ Playlist finalizada: {total} canais")
+        m3u.append("# ❌ Nenhum canal. Verifique /teste")
     return Response("\n".join(m3u), mimetype="application/vnd.apple.mpegurl")
 
 @app.route("/stream/<int:sid>/<path:cid>")
-def stream_rotear(sid, cid):
-    url_canal = request.args.get("u")
-    if not url_canal:
-        return "Parâmetro 'u' obrigatório", 400
-    link_final = buscar_link_stream(url_canal)
-    if link_final:
-        return redirect(link_final)
-    return "Link de stream não encontrado", 404
+def stream(sid, cid):
+    url = request.args.get("u")
+    if not url: return "Erro", 400
+    link = achar_stream(url)
+    return redirect(link) if link else "Não encontrado", 404
 
 @app.route("/epg.xml")
-def epg_vazio():
-    return Response(
-        '<?xml version="1.0" encoding="UTF-8"?><tv generator-info-name="ProxyPobreflix"/>',
-        mimetype="application/xml"
-    )
+def epg():
+    return Response('<?xml version="1.0"?><tv></tv>', mimetype="application/xml")
 
 if __name__ == "__main__":
-    porta = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, threaded=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
