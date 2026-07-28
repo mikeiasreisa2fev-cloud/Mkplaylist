@@ -1,5 +1,8 @@
 flask==2.3.3
 gunicorn==21.2.0
-requests-html==0.10.0
+requests==2.31.0
 beautifulsoup4==4.12.3
 setuptools==75.1.0
+pyppeteer==2.0.0
+lxml==4.9.4
+lxml_html_clean==0.1.0
