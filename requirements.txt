@@ -1,6 +1,5 @@
 flask==2.3.3
 gunicorn==21.2.0
-selenium==4.15.2
+requests-html==0.10.0
 beautifulsoup4==4.12.3
-undetected-chromedriver==3.5.5
-setuptools==75.1.0  # ✅ RESOLVE O ERRO DO DISTUTILS
+setuptools==75.1.0
