@@ -9,16 +9,18 @@ app = Flask(__name__)
 
 # Configurações do Servidor
 BASE_URL = "https://ycineflix.tudo30.shop/wp-json/xui-pflix/v1"
-APP_USER_AGENT = "okhttp/4.12.0"
-APP_IDENTIFIER = "site.speedflix"
+USER_AGENT = "okhttp/4.12.0"
+APP_ID = "site.speedflix"
 
-class SpeedFlixSession:
+class SpeedFlixAPI:
     def __init__(self):
         self.token = None
-        self.device_id = "550e8400-e29b-41d4-a716-446655440000" # ID Fixo para estabilidade
+        self.device_id = str(uuid.uuid4()).replace('-', '')[:16]
 
-    def login(self):
-        """Obtém o token Bearer necessário para canais e vídeos."""
+    def login(self, force=False):
+        """Obtém o token de acesso simulando o app original."""
+        if self.token and not force:
+            return self.token
         try:
             payload = {
                 "username": f"guest_{self.device_id[:8]}",
@@ -27,88 +29,90 @@ class SpeedFlixSession:
                 "model": "Samsung SM-G998B",
                 "version": "13"
             }
-            res = requests.post(f"{BASE_URL}/auth/login", json=payload, headers={"User-Agent": APP_USER_AGENT}, timeout=10)
-            if res.status_code == 200:
-                self.token = res.json().get("data", {}).get("token") or res.json().get("token")
+            r = requests.post(f"{BASE_URL}/auth/login", json=payload, 
+                             headers={"User-Agent": USER_AGENT}, timeout=10)
+            if r.status_code == 200:
+                self.token = r.json().get("data", {}).get("token") or r.json().get("token")
                 return self.token
         except: pass
         return None
 
     def get_headers(self):
-        h = {"User-Agent": APP_USER_AGENT, "X-Requested-With": APP_IDENTIFIER}
+        headers = {"User-Agent": USER_AGENT, "X-Requested-With": APP_ID}
         token = self.login()
-        if token: h["Authorization"] = f"Bearer {token}"
-        return h
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
 
-session = SpeedFlixSession()
-
-def get_channels(server_id):
-    """Puxa todos os canais de um servidor de forma exaustiva."""
-    all_items = []
-    for page in range(1, 15): # Aumentado para pegar até 1500 canais
-        try:
-            res = requests.get(f"{BASE_URL}/channels", params={
-                "server_id": server_id, "per_page": 100, "page": page
-            }, headers=session.get_headers(), timeout=12)
-            if res.status_code != 200: break
-            data = res.json()
-            items = data.get("data", {}).get("items") or data.get("items") or []
-            if not items: break
-            all_items.extend(items)
-            
-            meta = data.get("data", {}).get("meta") or data.get("meta") or {}
-            if page >= int(meta.get("total_pages", 1)): break
-        except: break
-    return all_items
+api = SpeedFlixAPI()
 
 @app.route("/")
 def index():
-    return "Status: Online. Use /playlist.m3u"
+    return "Proxy SpeedFlix Ativo. Use /playlist.m3u no TiviMate."
 
 @app.route("/playlist.m3u")
 def playlist():
-    host = request.host_url.rstrip('/')
-    token = session.login()
-    
-    # FORMATO ESPECIAL PARA TIVIMATE: Injeta headers na URL do stream
-    # O TiviMate reconhece o '|' e usa o que vem depois como cabeçalho HTTP
-    headers_suffix = f"|User-Agent={APP_USER_AGENT}&X-Requested-With={APP_IDENTIFIER}"
-    if token:
-        headers_suffix += f"&Authorization=Bearer {token}"
-    
+    host = request.host_url # Já termina com '/'
     m3u = ["#EXTM3U"]
+    
+    # Sufixo para o TiviMate usar os headers corretos no proxy e no vídeo
+    suffix = f"|User-Agent={USER_AGENT}&X-Requested-With={APP_ID}"
+    
     for sid in [1, 2, 3]:
-        channels = get_channels(sid)
-        for ch in channels:
-            ch_id = ch.get("id")
-            name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
-            group = f"{(ch.get('category_name') or 'Canais').upper()} [S{sid}]"
-            logo = ch.get("image") or ""
-            
-            m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{ch_id}" tvg-logo="{logo}" group-title="{group}",{name}')
-            # O link aponta para o nosso proxy que vai buscar a URL final do vídeo
-            m3u.append(f"{host}/stream/{sid}/{ch_id}{headers_suffix}")
-            
+        try:
+            # Busca canais (Pega 2 páginas de 100 para ser rápido e não dar erro 500)
+            for page in range(1, 3):
+                r = requests.get(f"{BASE_URL}/channels", 
+                                params={"server_id": sid, "per_page": 100, "page": page},
+                                headers=api.get_headers(), timeout=15)
+                if r.status_code != 200: break
+                items = r.json().get("data", {}).get("items") or r.json().get("items") or []
+                if not items: break
+                
+                for ch in items:
+                    cid = ch.get("id")
+                    name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
+                    group = f"{(ch.get('category_name') or 'Canais').upper()} [S{sid}]"
+                    logo = ch.get("image") or ""
+                    
+                    m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{group}",{name}')
+                    # Link modificado para aceitar o sufixo do TiviMate
+                    m3u.append(f"{host}stream/{sid}/{cid}{suffix}")
+        except: continue
+        
     return Response("\n".join(m3u), mimetype="text/plain")
 
-@app.route("/stream/<int:sid>/<int:cid>")
-def stream(sid, cid):
-    """Pega a URL final do vídeo usando a autorização do Render."""
+@app.route("/stream/<int:sid>/<cid>")
+def stream_proxy(sid, cid):
+    # O TiviMate envia o ID colado com os headers, aqui nós limpamos
+    clean_cid = cid.split('|')[0].split('?')[0]
+    
     try:
-        res = requests.get(f"{BASE_URL}/channels/{cid}/stream", 
-                          params={"server_id": sid, "t": int(time.time())}, 
-                          headers=session.get_headers(), timeout=10)
-        if res.status_code == 200:
-            video_url = res.json().get("data", {}).get("stream_url") or res.json().get("stream_url")
+        headers = api.get_headers()
+        r = requests.get(f"{BASE_URL}/channels/{clean_cid}/stream", 
+                        params={"server_id": sid, "t": int(time.time())},
+                        headers=headers, timeout=10)
+        
+        if r.status_code == 200:
+            data = r.json().get("data") or r.json()
+            video_url = data.get("stream_url") or data.get("free_url")
+            
             if video_url:
-                # Retorna o link final. O TiviMate usará os headers do sufixo para abrir.
-                return redirect(video_url)
+                # O SEGREDO: Injetar o token de autorização no link de REDIRECIONAMENTO
+                # Isso faz o TiviMate abrir o vídeo com a chave correta.
+                token = api.login()
+                final_url = f"{video_url}|User-Agent={USER_AGENT}&X-Requested-With={APP_ID}"
+                if token:
+                    final_url += f"&Authorization=Bearer%20{token}"
+                
+                return redirect(final_url)
     except: pass
-    return "Offline", 404
+    return "Erro", 404
 
 @app.route("/epg.xml")
 def epg():
     return Response('<?xml version="1.0" encoding="UTF-8"?><tv></tv>', mimetype="application/xml")
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
