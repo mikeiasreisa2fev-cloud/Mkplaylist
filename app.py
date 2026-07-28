@@ -1,94 +1,93 @@
-import httpx
+import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from flask import Flask, Response, redirect, request
 import os
-import random
 
 app = Flask(__name__)
 
-# Domínios oficiais
-BASE_SITE = "https://app.pobreflix2.site"
+# Usando o novo domínio que você forneceu
+BASE_URL = "https://ycineflix.tudo30.shop/wp-json/xui-pflix/v1"
 
-def get_headers():
-    # Gera um IP falso do Brasil para tentar passar pelo firewall
-    fake_ip = f"189.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(0,255)}"
-    return {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36",
-        "X-Forwarded-For": fake_ip,
-        "X-Real-IP": fake_ip,
-        "Accept": "application/json",
-        "Connection": "keep-alive"
-    }
+# Headers EXATOS do aplicativo Android oficial
+HEADERS = {
+    "User-Agent": "okhttp/4.12.0",
+    "Accept-Encoding": "gzip",
+    "Connection": "Keep-Alive",
+    "X-Requested-With": "site.speedflix", # Identificador do App
+    "Host": "ycineflix.tudo30.shop"
+}
 
-def get_api_data(endpoint, params=None):
-    """Usa o rest_route para tentar burlar o bloqueio de IP do Render."""
-    url = f"{BASE_SITE}/"
-    # Transforma o endpoint em rest_route (Ex: channels -> /xui-pflix/v1/channels)
-    query_params = {"rest_route": f"/xui-pflix/v1/{endpoint}"}
-    if params:
-        query_params.update(params)
-    
+def get_channels(server_id):
+    """Busca canais tentando burlar o bloqueio de IP."""
     try:
-        # Usamos HTTPX que gerencia melhor os certificados que o Requests
-        with httpx.Client(headers=get_headers(), follow_redirects=True, timeout=15.0) as client:
-            res = client.get(url, params=query_params)
-            if res.status_code == 200:
-                data = res.json()
-                return data.get("data") or data
+        # Aumentamos o per_page para 500 para pegar tudo de uma vez e evitar várias requisições
+        url = f"{BASE_URL}/channels"
+        params = {"server_id": server_id, "per_page": 500, "page": 1}
+        
+        response = requests.get(url, params=params, headers=HEADERS, timeout=20)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Verifica se os canais estão na chave 'data' ou na raiz
+            return data.get("data", {}).get("items") or data.get("items") or []
+        else:
+            print(f"Erro {response.status_code} no servidor {server_id}")
     except Exception as e:
-        print(f"Erro na conexão: {e}")
-    return None
+        print(f"Falha na conexão: {e}")
+    return []
 
 @app.route("/playlist.m3u")
 def playlist():
     host = request.host_url.rstrip('/')
     m3u = ["#EXTM3U"]
-    processed = set()
+    processed_ids = set()
     
-    # Servidores 1, 2 e 3
+    # Tenta carregar canais dos 3 servidores
     for sid in [1, 2, 3]:
-        data = get_api_data("channels", {"server_id": sid, "per_page": 200})
-        if data:
-            items = data if isinstance(data, list) else data.get("items", [])
-            for ch in items:
-                ch_id = ch.get("id")
-                if not ch_id or ch_id in processed: continue
-                processed.add(ch_id)
-                
-                name = ch.get("name") or ch.get("title") or "Canal"
-                logo = ch.get("image") or ""
-                group = ch.get("category_name") or f"Servidor {sid}"
-                
-                m3u.append(f'#EXTINF:-1 tvg-id="{ch_id}" tvg-logo="{logo}" group-title="{group}",{name}')
-                m3u.append(f"{host}/stream/{sid}/{ch_id}")
+        channels = get_channels(sid)
+        for ch in channels:
+            ch_id = ch.get("id")
+            if not ch_id or ch_id in processed_ids: continue
+            processed_ids.add(ch_id)
+            
+            name = ch.get("name") or ch.get("title") or "Canal"
+            logo = ch.get("image") or ""
+            group = ch.get("category_name") or f"Servidor {sid}"
+            
+            m3u.append(f'#EXTINF:-1 tvg-id="{ch_id}" tvg-logo="{logo}" group-title="{group}",{name}')
+            # Link que passa por este script para pegar o vídeo real
+            m3u.append(f"{host}/stream/{sid}/{ch_id}")
     
     if len(m3u) <= 1:
-        m3u.append("# ERRO: O Render continua bloqueado.")
-        m3u.append("# A UNICA FORMA NO RENDER E USANDO UM PROXY OU MUDANDO PARA O KOYEB.COM")
+        m3u.append("# ERRO: Servidor bloqueou o Render. Tente abrir o link no seu 4G para testar.")
         
     return Response("\n".join(m3u), mimetype="text/plain")
 
 @app.route("/epg.xml")
 def epg():
+    """Gera um EPG básico para os canais."""
     tv = ET.Element("tv")
-    data = get_api_data("channels", {"server_id": 1, "per_page": 50})
-    if data:
-        items = data if isinstance(data, list) else data.get("items", [])
-        for ch in items:
-            ch_id = ch.get("id")
-            ch_elem = ET.SubElement(tv, "channel", id=str(ch_id))
-            ET.SubElement(ch_elem, "display-name").text = ch.get("name") or ch.get("title")
-            
+    channels = get_channels(1)[:40] # Limita a 40 para não dar erro de memória no Render
+    for ch in channels:
+        ch_id = ch.get("id")
+        ch_elem = ET.SubElement(tv, "channel", id=str(ch_id))
+        ET.SubElement(ch_elem, "display-name").text = ch.get("name")
+    
     return Response(ET.tostring(tv, encoding="utf-8"), mimetype="application/xml")
 
 @app.route("/stream/<int:sid>/<int:cid>")
 def stream(sid, cid):
-    data = get_api_data(f"channels/{cid}/stream", {"server_id": sid})
-    if data and isinstance(data, dict):
-        url = data.get("stream_url")
-        if url: return redirect(url)
-    return "Offline", 404
+    """Pega o link de vídeo real no momento que o TiviMate der o play."""
+    try:
+        url = f"{BASE_URL}/channels/{cid}/stream"
+        res = requests.get(url, params={"server_id": sid}, headers=HEADERS, timeout=10)
+        if res.status_code == 200:
+            video_url = res.json().get("data", {}).get("stream_url") or res.json().get("stream_url")
+            if video_url:
+                return redirect(video_url)
+    except: pass
+    return "Link indisponível", 404
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
