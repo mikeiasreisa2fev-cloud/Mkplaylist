@@ -1,6 +1,7 @@
 from flask import Flask, Response, redirect, request
-from requests_html import HTMLSession
+from pyppeteer import launch
 from bs4 import BeautifulSoup
+import asyncio
 import time
 import os
 import re
@@ -14,36 +15,43 @@ SERVERS = [
     {"id": 3, "url": "https://app.pobreflix2.site/canais/categorias/?thema=1&server=speed-3", "name": "SPEED-3"},
 ]
 
-# 🔧 SESSÃO CAMUFLADA (SIMULA NAVEGADOR REAL)
-def criar_sessao():
-    s = HTMLSession()
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-        "Referer": "https://app.pobreflix2.site/"
-    })
-    return s
-
-def log_debug(msg):
-    print(f"[LOG {time.ctime()}] {msg}")
+# 🔧 NAVEGADOR ASSÍNCRONO LEVE E COMPATÍVEL
+async def pegar_pagina_pyppeteer(url):
+    browser = None
+    try:
+        browser = await launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--window-size=1920,1080",
+                "--disable-blink-features=AutomationControlled"
+            ],
+            defaultViewport=None
+        )
+        page = await browser.newPage()
+        await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+        await page.goto(url, {"waitUntil": "networkidle2", "timeout": 30000})
+        await asyncio.sleep(4) # Espera JS carregar
+        conteudo = await page.content()
+        print(f"[✓] Carregado: {url[:60]} | Tamanho: {len(conteudo)}")
+        return conteudo
+    except Exception as e:
+        print(f"[✗] Erro {url[:60]}: {str(e)}")
+        return ""
+    finally:
+        if browser:
+            await browser.close()
 
 def pegar_pagina(url):
-    """Carrega página e executa JS com requests-html"""
-    try:
-        sessao = criar_sessao()
-        log_debug(f"Acessando: {url[:60]}...")
-        resp = sessao.get(url, timeout=25)
-        # ✅ Executa JavaScript (muito mais leve que Selenium)
-        resp.html.render(timeout=20, sleep=4, keep_script=True)
-        return resp.html.html
-    except Exception as e:
-        log_debug(f"❌ Erro: {str(e)}")
-        return ""
+    """Wrapper síncrono para Flask"""
+    return asyncio.run(pegar_pagina_pyppeteer(url))
 
 def extrair_categorias(html):
     soup = BeautifulSoup(html, "html.parser")
     cats = []
-    seletores = ["a[href*='categorias']", ".category-item", ".list-group a", "div.card a"]
+    seletores = ["a[href*='categorias']", ".category-item a", ".list-group a", "div.card a"]
     for sel in seletores:
         for a in soup.select(sel):
             nome = a.get_text(strip=True)
@@ -90,7 +98,7 @@ def achar_stream(url):
 # 📱 ROTAS
 @app.route("/")
 def home():
-    return "<h1>✅ Proxy Leve & Anti-Bloqueio</h1><p>Teste: <a href='/teste'>/teste</a> | Playlist: <a href='/playlist.m3u'>/playlist.m3u</a></p>"
+    return "<h1>✅ Proxy Pyppeteer Estável</h1><p>Teste: <a href='/teste'>/teste</a> | Playlist: <a href='/playlist.m3u'>/playlist.m3u</a></p>"
 
 @app.route("/teste")
 def teste():
