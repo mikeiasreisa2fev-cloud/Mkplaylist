@@ -10,14 +10,14 @@ import re
 
 app = Flask(__name__)
 
-# Configurações dos servidores
+# ✅ SERVIDORES PÚBLICOS QUE VOCÊ PASSOU
 SERVERS = [
     {"id": 1, "url": "https://app.pobreflix2.site/canais/categorias/?thema=1&server=speed-1", "name": "SPEED-1"},
     {"id": 2, "url": "https://app.pobreflix2.site/canais/categorias/?thema=1&server=speed-2", "name": "SPEED-2"},
     {"id": 3, "url": "https://app.pobreflix2.site/canais/categorias/?thema=1&server=speed-3", "name": "SPEED-3"},
 ]
 
-# Configurações do Chrome para rodar sem interface (Render)
+# 🔧 Configura Chrome para rodar no Render (sem interface)
 def criar_driver():
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
@@ -34,19 +34,15 @@ def pegar_canais_servidor(servidor):
     try:
         driver = criar_driver()
         driver.get(servidor["url"])
-        time.sleep(5) # Espera JS carregar tudo
+        time.sleep(6) # Espera JS carregar
         html = driver.page_source
         driver.quit()
 
         soup = BeautifulSoup(html, "html.parser")
-        print(f"✅ Lendo {servidor['name']} — página carregada")
+        print(f"✅ Lendo {servidor['name']}")
 
-        # Agora busca seletores mais genéricos e reais
-        categorias = soup.select("a[href*='categorias']") or soup.select(".category-item a") or soup.select("div a")
-        if not categorias:
-            print("⚠️ Nenhuma categoria encontrada")
-            return []
-
+        # Pega TODAS as categorias
+        categorias = soup.select("a[href*='categorias']") or soup.select("div a")
         for cat in categorias:
             cat_url = cat.get("href")
             if not cat_url or "javascript:" in cat_url: continue
@@ -54,16 +50,16 @@ def pegar_canais_servidor(servidor):
                 cat_url = "https://app.pobreflix2.site" + cat_url
 
             try:
-                driver = criar_driver()
-                driver.get(cat_url)
-                time.sleep(3)
-                cat_html = driver.page_source
-                driver.quit()
+                d2 = criar_driver()
+                d2.get(cat_url)
+                time.sleep(4)
+                cat_html = d2.page_source
+                d2.quit()
                 s_cat = BeautifulSoup(cat_html, "html.parser")
                 grupo = cat.get_text(strip=True) or "CANAIS"
 
-                # Ajuste o seletor conforme o conteúdo real
-                items = s_cat.select("a[href*='canal']") or s_cat.select(".channel-card a") or s_cat.select(".item-link")
+                # Pega canais na categoria
+                items = s_cat.select("a[href*='canal']") or s_cat.select(".item a") or s_cat.select("div a")
                 for item in items:
                     nome = item.get_text(strip=True)
                     href = item.get("href")
@@ -86,32 +82,30 @@ def pegar_canais_servidor(servidor):
                         "sid": servidor["id"]
                     })
             except Exception as ec:
-                print(f"Erro categoria {cat_url}: {ec}")
+                print(f"⚠️ Erro cat: {ec}")
     except Exception as e:
-        print(f"Erro servidor {servidor['id']}: {e}")
+        print(f"❌ Erro servidor {servidor['id']}: {e}")
     return canais
 
-def pegar_link_stream(url_canal):
+def pegar_stream(url_canal):
     try:
         driver = criar_driver()
         driver.get(url_canal)
-        time.sleep(4)
+        time.sleep(5)
         html = driver.page_source
         driver.quit()
-
-        # Procura padrões de stream
         m = re.search(r'["\'](https?://[^"\']+\.m3u8[^"\']*)["\']', html)
         if m: return m.group(1)
         m = re.search(r'stream_url\s*[=:]\s*["\']([^"\']+)["\']', html)
         if m: return m.group(1)
     except Exception as e:
-        print(f"Erro stream {url_canal}: {e}")
+        print(f"Erro stream: {e}")
     return None
 
-# Rotas
+# 🚀 ROTAS
 @app.route("/")
 def index():
-    return "<h1>✅ Proxy com Selenium (Carrega JS)</h1><p>Playlist: /playlist.m3u</p>"
+    return "<h1>✅ Proxy SPEED-1/2/3 Ativo</h1><p>Playlist: <a href='/playlist.m3u'>/playlist.m3u</a></p>"
 
 @app.route("/playlist.m3u")
 def playlist():
@@ -124,16 +118,16 @@ def playlist():
             m3u.append(f'{host}stream/{ch["sid"]}/{total}?page={ch["url_pagina"]}')
             total += 1
     if total == 0:
-        m3u.append("# ❌ Nenhum canal carregado. Verifique logs ou aumente o tempo de espera.")
+        m3u.append("# ❌ Nenhum canal. Aguarde 1ª carga ou verifique logs.")
     return Response("\n".join(m3u), mimetype="application/vnd.apple.mpegurl")
 
 @app.route("/stream/<int:sid>/<path:cid>")
 def stream(sid, cid):
     page_url = request.args.get("page")
-    if not page_url: return "Faltou parâmetro", 400
-    link = pegar_link_stream(page_url)
+    if not page_url: return "Faltou parametro", 400
+    link = pegar_stream(page_url)
     if link: return redirect(link)
-    return "Link não encontrado", 404
+    return "Link nao encontrado", 404
 
 @app.route("/epg.xml")
 def epg():
