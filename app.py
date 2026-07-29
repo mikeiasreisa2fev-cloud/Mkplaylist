@@ -4,129 +4,140 @@ from flask import Flask, Response, redirect, request
 import os
 import time
 import uuid
+import random
 
 app = Flask(__name__)
 
-# Lista de domínios ativos para o SpeedFlix
-DOMAINS = [
-    "https://app.pobreflix2.site/wp-json/xui-pflix/v1",
-    "https://ycineflix.tudo30.shop/wp-json/xui-pflix/v1",
-    "https://speedflix02.com/wp-json/xui-pflix/v1"
-]
-
+# Domínio fornecido pelo usuário que agrupa os servidores
+BASE_URL = "https://ycineflix.tudo30.shop"
 USER_AGENT = "okhttp/4.12.0"
 APP_ID = "site.speedflix"
 
 class SpeedFlixAPI:
     def __init__(self):
         self.token = None
-        self.base_url = DOMAINS[0]
-        self.device_id = "fb387652c" + str(uuid.uuid4())[:7] # ID mais parecido com Android
+        self.device_id = str(uuid.uuid4()).replace('-', '')[:16]
+
+    def get_fake_headers(self):
+        """Gera headers que simulam um dispositivo real do Brasil."""
+        fake_ip = f"{random.choice([177, 179, 186, 187, 189, 191, 200, 201])}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(0,255)}"
+        return {
+            "User-Agent": USER_AGENT,
+            "X-Requested-With": APP_ID,
+            "X-Forwarded-For": fake_ip,
+            "X-Real-IP": fake_ip,
+            "Referer": f"{BASE_URL}/",
+            "Accept": "application/json"
+        }
 
     def login(self):
-        """Tenta o login de convidado em todos os domínios disponíveis."""
-        for base in DOMAINS:
-            try:
-                payload = {
-                    "username": f"guest_{self.device_id[:6]}",
-                    "password": "guest",
-                    "device_id": self.device_id
-                }
-                r = requests.post(f"{base}/auth/login", json=payload, 
-                                 headers={"User-Agent": USER_AGENT}, timeout=8)
-                if r.status_code == 200:
-                    self.base_url = base
-                    self.token = r.json().get("data", {}).get("token") or r.json().get("token")
-                    return self.token
-            except: continue
+        """Tenta o login de convidado usando o bypass rest_route do WordPress."""
+        if self.token: return self.token
+        try:
+            # Técnica de Bypass: usa o parâmetro rest_route para pular bloqueios de URL
+            url = f"{BASE_URL}/"
+            params = {"rest_route": "/xui-pflix/v1/auth/login"}
+            payload = {
+                "username": f"guest_{self.device_id[:6]}",
+                "password": "guest",
+                "device_id": self.device_id
+            }
+            r = requests.post(url, params=params, json=payload, headers=self.get_fake_headers(), timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                self.token = data.get("data", {}).get("token") or data.get("token")
+                return self.token
+        except: pass
         return None
 
-    def get_headers(self):
-        headers = {"User-Agent": USER_AGENT, "X-Requested-With": APP_ID}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        return headers
+    def get_api_data(self, endpoint, params=None):
+        """Busca dados da API usando a técnica de bypass rest_route."""
+        url = f"{BASE_URL}/"
+        query = {"rest_route": f"/xui-pflix/v1/{endpoint}"}
+        if params: query.update(params)
+        
+        headers = self.get_fake_headers()
+        token = self.login()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+            
+        try:
+            return requests.get(url, params=query, headers=headers, timeout=15)
+        except:
+            return None
 
 api = SpeedFlixAPI()
 
 @app.route("/")
 def index():
-    return f"<h1>Proxy SpeedFlix</h1><p>Status: Online</p><p>Link: {request.host_url}playlist.m3u</p>"
+    return "<h1>SpeedFlix Proxy Ativo</h1><p>Playlist: /playlist.m3u</p>"
 
 @app.route("/playlist.m3u")
 def playlist():
     host = request.host_url
     m3u = ["#EXTM3U"]
     
-    # Tenta logar antes de começar
-    api.login()
-    
-    # Cabeçalhos para o TiviMate abrir o vídeo
-    token_suffix = f"&Authorization=Bearer%20{api.token}" if api.token else ""
-    suffix = f"|User-Agent={USER_AGENT}&X-Requested-With={APP_ID}{token_suffix}"
+    # Prepara o sufixo de autenticação para o TiviMate
+    token = api.login()
+    token_part = f"&Authorization=Bearer%20{token}" if token else ""
+    suffix = f"|User-Agent={USER_AGENT}&X-Requested-With={APP_ID}{token_part}"
 
-    total_canais = 0
+    total = 0
     errors = []
 
+    # Busca canais dos servidores 1, 2 e 3
     for sid in [1, 2, 3]:
-        # Busca até 3 páginas para garantir que pegamos os 176, 192 e 127 canais
-        for page in range(1, 4):
-            try:
-                r = requests.get(f"{api.base_url}/channels", 
-                                params={"server_id": sid, "per_page": 100, "page": page},
-                                headers=api.get_headers(), timeout=12)
-                
-                if r.status_code != 200:
-                    errors.append(f"Servidor {sid} Pagina {page} retornou erro {r.status_code}")
-                    break
-                
-                data = r.json()
-                items = data.get("data", {}).get("items") or data.get("items") or []
-                
-                if not items: break
-                
-                for ch in items:
-                    cid = ch.get("id")
-                    name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
-                    cat = ch.get('category_name') or 'Canais'
-                    group = f"{cat.upper()} [S{sid}]"
-                    logo = ch.get("image") or ""
-                    
-                    m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{group}",{name}')
-                    m3u.append(f"{host}stream/{sid}/{cid}{suffix}")
-                    total_canais += 1
-                
-                # Se a API indicar que não tem mais páginas, para o loop
-                meta = data.get("data", {}).get("meta") or data.get("meta") or {}
-                if page >= int(meta.get("total_pages", 1)): break
-            except Exception as e:
-                errors.append(f"Erro no Servidor {sid}: {str(e)}")
+        # Tenta carregar até 5 páginas por servidor para garantir todos os canais
+        for page in range(1, 6):
+            res = api.get_api_data("channels", {"server_id": sid, "per_page": 100, "page": page})
+            
+            if not res or res.status_code != 200:
+                code = res.status_code if res else "TIMEOUT"
+                errors.append(f"Servidor {sid} Pagina {page} -> Erro {code}")
                 break
+            
+            data = res.json()
+            items = data.get("data", {}).get("items") or data.get("items") or []
+            if not items: break
+            
+            for ch in items:
+                cid = ch.get("id")
+                if not cid: continue
+                
+                name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
+                cat = ch.get('category_name') or 'Canais'
+                group = f"{cat.upper()} [S{sid}]"
+                logo = ch.get("image") or ""
+                
+                m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{group}",{name}')
+                m3u.append(f"{host}stream/{sid}/{cid}{suffix}")
+                total += 1
+                
+            meta = data.get("data", {}).get("meta") or {}
+            if page >= int(meta.get("total_pages", 1)): break
 
-    if total_canais == 0:
-        m3u.append("# ERRO: Nenhum canal capturado.")
-        for err in errors:
-            m3u.append(f"# DETALHE: {err}")
-        m3u.append(f"# URL_USADA: {api.base_url}")
+    if total == 0:
+        m3u.append("# ERRO: Conexao recusada pelo servidor (403).")
+        for err in errors: m3u.append(f"# DETALHE: {err}")
+        m3u.append(f"# LOGIN: {'SUCESSO' if api.token else 'FALHA'}")
+        m3u.append(f"# DOMINIO: {BASE_URL}")
 
     return Response("\n".join(m3u), mimetype="text/plain")
 
 @app.route("/stream/<int:sid>/<path:cid>")
 def stream_proxy(sid, cid):
-    clean_cid = cid.split('|')[0]
-    try:
-        # Gera o link do vídeo usando o token e o tempo atual
-        r = requests.get(f"{api.base_url}/channels/{clean_cid}/stream", 
-                        params={"server_id": sid, "t": int(time.time())},
-                        headers=api.get_headers(), timeout=10)
-        
-        if r.status_code == 200:
-            data = r.json().get("data") or r.json()
-            video_url = data.get("stream_url")
-            if video_url:
-                return redirect(video_url)
-    except: pass
-    return "Offline", 404
+    # Limpa o ID do canal removendo sufixos do player
+    clean_cid = cid.split('|')[0].split('?')[0]
+    
+    # Solicita o link de vídeo real
+    res = api.get_api_data(f"channels/{clean_cid}/stream", {"server_id": sid, "t": int(time.time())})
+    if res and res.status_code == 200:
+        data = res.json()
+        video_url = data.get("data", {}).get("stream_url") or data.get("stream_url")
+        if video_url:
+            return redirect(video_url)
+            
+    return "Link Offline", 404
 
 @app.route("/epg.xml")
 def epg():
