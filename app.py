@@ -1,135 +1,105 @@
 import requests
+from bs4 import BeautifulSoup
 import xml.etree.ElementTree as ET
 from flask import Flask, Response, redirect, request
-import os
 import time
-import uuid
 
 app = Flask(__name__)
 
-# CONFIGURAÇÕES
-# Usando o domínio do portal que você passou, que costuma ser menos bloqueado
-DOMAINS = ["https://ycineflix.tudo30.shop", "https://app.pobreflix2.site"]
-USER_AGENT = "okhttp/4.12.0"
-APP_ID = "site.speedflix"
+# Os links que você passou
+BASE_URL = "https://app.pobreflix2.site"
+SERVER_LINKS = {
+    1: "https://app.pobreflix2.site/canais/?thema=1&server=speed-1",
+    2: "https://app.pobreflix2.site/canais/?thema=1&server=speed-2",
+    3: "https://app.pobreflix2.site/canais/?thema=1&server=speed-3"
+}
 
-# CACHE EM MEMÓRIA (Dura 2 horas)
-# Isso evita que o SpeedFlix bloqueie o IP do Render por excesso de pedidos
-CACHE = {"m3u": None, "time": 0}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Referer": "https://app.pobreflix2.site/",
+    "Accept-Language": "pt-BR,pt;q=0.9"
+}
 
-class SpeedFlixAPI:
-    def __init__(self):
-        self.token = None
-        self.base = DOMAINS[0]
-        self.did = "speed_box_" + str(uuid.uuid4())[:8]
-
-    def call(self, path, method="GET", params=None, json_data=None):
-        """Faz chamadas à API usando a técnica de Bypass (rest_route)."""
-        headers = {"User-Agent": USER_AGENT, "X-Requested-With": APP_ID}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        
-        # Bypass de Firewall do WordPress
-        url = f"{self.base}/"
-        q = {"rest_route": f"/xui-pflix/v1/{path}"}
-        if params: q.update(params)
-
-        try:
-            if method == "POST":
-                return requests.post(url, params=q, json=json_data, headers=headers, timeout=12)
-            return requests.get(url, params=q, headers=headers, timeout=12)
-        except:
-            return None
-
-    def login(self):
-        """Realiza login de convidado para validar a sessão."""
-        if self.token: return True
-        for d in DOMAINS:
-            self.base = d
-            # O app oficial sempre pede o config antes do login
-            self.call("app/config")
+def get_channels_from_html(sid):
+    """Lê a página web e extrai os canais manualmente."""
+    channels = []
+    try:
+        url = SERVER_LINKS.get(sid)
+        res = requests.get(url, headers=HEADERS, timeout=20)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
+            # Busca todos os links que apontam para um canal
+            # Geralmente são do tipo: https://app.pobreflix2.site/canais/ID/
+            links = soup.find_all('a', href=True)
+            for link in links:
+                href = link['href']
+                if '/canais/' in href and href.strip('/').split('/')[-1].isdigit():
+                    cid = href.strip('/').split('/')[-1]
+                    # Tenta pegar o nome dentro da tag title ou de um span/h2
+                    name = link.get('title') or link.text.strip() or f"Canal {cid}"
+                    
+                    # Tenta pegar a imagem
+                    img = link.find('img')
+                    logo = img['src'] if img and img.has_attr('src') else ""
+                    
+                    channels.append({
+                        "id": cid,
+                        "name": name.replace("Assistir ", ""),
+                        "logo": logo,
+                        "group": f"SERVIDOR {sid}"
+                    })
+    except Exception as e:
+        print(f"Erro no scraping do servidor {sid}: {e}")
+    
+    # Remove duplicados mantendo a ordem
+    seen = set()
+    unique_channels = []
+    for c in channels:
+        if c['id'] not in seen:
+            unique_channels.append(c)
+            seen.add(c['id'])
             
-            res = self.call("auth/login", "POST", json_data={
-                "username": f"guest_{self.did}", 
-                "password": "guest", 
-                "device_id": self.did
-            })
-            if res and res.status_code == 200:
-                data = res.json()
-                self.token = data.get("data", {}).get("token") or data.get("token")
-                return True
-        return False
-
-api = SpeedFlixAPI()
+    return unique_channels
 
 @app.route("/")
 def index():
-    return "<h1>Proxy SpeedFlix Estabilizado</h1><p>Playlist: /playlist.m3u</p>"
+    return "<h1>SpeedFlix Web Scanner Ativo</h1><p>Playlist: /playlist.m3u</p>"
 
 @app.route("/playlist.m3u")
 def playlist():
-    global CACHE
-    now = time.time()
-    
-    # Se tivermos a lista salva a menos de 2 horas, entrega ela na hora!
-    if CACHE["m3u"] and (now - CACHE["time"] < 7200):
-        return Response(CACHE["m3u"], mimetype="text/plain")
-
-    if not api.login():
-        return "#EXTM3U\n# ERRO: O Render foi bloqueado pelo SpeedFlix (403).\n# Tente abrir este link no 4G do celular para testar."
-
     m3u = ["#EXTM3U"]
     host = request.host_url
     
-    # Headers que o TiviMate usará para abrir o vídeo
-    suffix = f"|User-Agent={USER_AGENT}&X-Requested-With={APP_ID}&Authorization=Bearer {api.token}"
-
     for sid in [1, 2, 3]:
-        # Busca as 2 primeiras páginas de cada servidor (aprox 400 canais)
-        for p in [1, 2]:
-            res = api.call("channels", params={"server_id": sid, "per_page": 100, "page": p})
-            if res and res.status_code == 200:
-                data = res.json()
-                items = data.get("data", {}).get("items") or data.get("items") or []
-                if not items: break
-                
-                for ch in items:
-                    cid = ch.get("id")
-                    if not cid: continue
-                    name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
-                    cat = f"{(ch.get('category_name') or 'Canais').upper()} [S{sid}]"
-                    logo = ch.get("image") or ""
-                    
-                    m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{cat}",{name}')
-                    m3u.append(f"{host}stream/{sid}/{cid}{suffix}")
-            else:
-                break
-        time.sleep(1) # Pausa para não ser bloqueado
-
-    result = "\n".join(m3u)
-    if len(m3u) > 1:
-        CACHE = {"m3u": result, "time": now} # Salva no Cache
-        
-    return Response(result, mimetype="text/plain")
-
-@app.route("/stream/<int:sid>/<path:cid>")
-def stream(sid, cid):
-    """Obtém o link de vídeo real no momento do Play."""
-    # Limpa o ID de qualquer sufixo do TiviMate
-    clean_id = cid.split('|')[0].split('?')[0]
-    
-    res = api.call(f"channels/{clean_id}/stream", params={"server_id": sid, "t": int(time.time())})
-    if res and res.status_code == 200:
-        data = res.json()
-        url = data.get("data", {}).get("stream_url") or data.get("stream_url")
-        if url:
-            return redirect(url)
+        channels = get_channels_from_html(sid)
+        for ch in channels:
+            name = f"{ch['name']} [S{sid}]"
+            m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{ch["id"]}" tvg-logo="{ch["logo"]}" group-title="{ch["group"]}",{name}')
+            m3u.append(f"{host}stream/{sid}/{ch['id']}")
             
-    return "Offline", 404
+    if len(m3u) == 1:
+        return "#EXTM3U\n# ERRO: O site nao permitiu a leitura do codigo (Block).\n# Tente hospedar no Railway.app."
 
-@app.route("/epg.xml")
-def epg():
-    return Response('<?xml version="1.0" encoding="UTF-8"?><tv></tv>', mimetype="application/xml")
+    return Response("\n".join(m3u), mimetype="text/plain")
+
+@app.route("/stream/<int:sid>/<cid>")
+def stream(sid, cid):
+    """Tenta obter o link de vídeo final via API."""
+    try:
+        # Aqui ainda tentamos a API, pois o link de vídeo só sai por ela
+        api_url = f"https://app.pobreflix2.site/wp-json/xui-pflix/v1/channels/{cid}/stream"
+        # Para o vídeo, usamos o User-Agent de celular que é mais aceito
+        headers = {"User-Agent": "okhttp/4.12.0", "X-Requested-With": "site.speedflix"}
+        res = requests.get(api_url, params={"server_id": sid, "t": int(time.time())}, headers=headers, timeout=10)
+        
+        if res.status_code == 200:
+            data = res.json()
+            video_url = data.get("data", {}).get("stream_url") or data.get("stream_url")
+            if video_url:
+                return redirect(video_url)
+    except: pass
+    return "Offline", 404
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
