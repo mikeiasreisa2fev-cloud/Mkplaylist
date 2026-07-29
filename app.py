@@ -7,106 +7,99 @@ import uuid
 
 app = Flask(__name__)
 
-# Domínios
-BASE_URL = "https://app.pobreflix2.site"
-API_PATH = "/wp-json/xui-pflix/v1"
+# Domínio que você forneceu
+BASE_URL = "https://ycineflix.tudo30.shop/wp-json/xui-pflix/v1"
+USER_AGENT = "okhttp/4.12.0"
+APP_ID = "site.speedflix"
 
-# Headers Ultra-Reais
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "pt-BR,pt;q=0.9",
-    "X-Requested-With": "site.speedflix",
-    "Origin": BASE_URL,
-    "Referer": f"{BASE_URL}/"
-}
-
-class SpeedFlixSession:
+class SpeedFlixAPI:
     def __init__(self):
-        self.session = requests.Session()
         self.token = None
         self.device_id = str(uuid.uuid4()).replace('-', '')[:16]
 
-    def refresh_session(self):
-        """Simula a abertura do app para validar o IP no firewall."""
+    def login(self):
+        """Faz login de convidado para liberar canais e vídeos."""
+        if self.token: return self.token
         try:
-            # 1. Visita o site principal para pegar Cookies (PHPSESSID, etc)
-            self.session.get(f"{BASE_URL}/", headers={"User-Agent": HEADERS["User-Agent"]}, timeout=10)
-            
-            # 2. Carrega o Config (Isso valida a rota na Cloudflare)
-            self.session.get(f"{BASE_URL}{API_PATH}/app/config", headers=HEADERS, timeout=10)
-            
-            # 3. Faz o Login de Convidado
             payload = {
-                "username": f"guest_{self.device_id[:6]}",
+                "username": f"guest_{self.device_id[:8]}",
                 "password": "guest",
-                "device_id": self.device_id
+                "device_id": self.device_id,
+                "model": "Samsung SM-G998B",
+                "version": "13"
             }
-            r = self.session.post(f"{BASE_URL}{API_PATH}/auth/login", json=payload, headers=HEADERS, timeout=10)
+            headers = {"User-Agent": USER_AGENT, "X-Requested-With": APP_ID, "Content-Type": "application/json"}
+            r = requests.post(f"{BASE_URL}/auth/login", json=payload, headers=headers, timeout=10)
             if r.status_code == 200:
-                self.token = r.json().get("data", {}).get("token") or r.json().get("token")
-                return True
+                data = r.json()
+                self.token = data.get("data", {}).get("token") or data.get("token")
+                return self.token
         except: pass
-        return False
+        return None
 
     def get_headers(self):
-        h = HEADERS.copy()
-        if self.token:
-            h["Authorization"] = f"Bearer {self.token}"
-        return h
+        headers = {"User-Agent": USER_AGENT, "X-Requested-With": APP_ID, "Accept": "application/json"}
+        token = self.login()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
 
-s = SpeedFlixSession()
+api = SpeedFlixAPI()
 
 @app.route("/")
 def index():
-    return "<h1>Proxy SpeedFlix Ativo</h1><p>M3U: /playlist.m3u</p>"
+    return "<h1>Proxy SpeedFlix Ativo no Railway</h1><p>M3U: /playlist.m3u</p>"
 
 @app.route("/playlist.m3u")
 def playlist():
-    m3u = ["#EXTM3U"]
     host = request.host_url
+    m3u = ["#EXTM3U"]
     
-    # Valida a sessão antes de buscar
-    s.refresh_session()
-    
-    # Headers para o TiviMate abrir o vídeo
-    token_suffix = f"&Authorization=Bearer%20{s.token}" if s.token else ""
-    suffix = f"|User-Agent={HEADERS['User-Agent']}&X-Requested-With=site.speedflix{token_suffix}"
+    # Headers para o TiviMate abrir o vídeo com autorização
+    token = api.login()
+    suffix = f"|User-Agent={USER_AGENT}&X-Requested-With={APP_ID}"
+    if token: suffix += f"&Authorization=Bearer {token}"
 
-    found = 0
     for sid in [1, 2, 3]:
-        try:
-            # Pede 500 canais de uma vez para não fazer muitas requisições
-            url = f"{BASE_URL}{API_PATH}/channels"
-            r = s.session.get(url, params={"server_id": sid, "per_page": 500}, headers=s.get_headers(), timeout=20)
-            
-            if r.status_code == 200:
-                items = r.json().get("data", {}).get("items") or r.json().get("items") or []
+        for page in range(1, 10): # Busca até 1000 canais por servidor
+            try:
+                r = requests.get(f"{BASE_URL}/channels", 
+                                params={"server_id": sid, "per_page": 100, "page": page},
+                                headers=api.get_headers(), timeout=15)
+                if r.status_code != 200: break
+                data = r.json()
+                items = data.get("data", {}).get("items") or data.get("items") or []
+                if not items: break
+                
                 for ch in items:
                     cid = ch.get("id")
                     name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
-                    cat = (ch.get('category_name') or 'Canais').upper()
-                    m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{ch.get("image","")}" group-title="{cat} [S{sid}]",{name}')
+                    group = f"{(ch.get('category_name') or 'Canais').upper()} [S{sid}]"
+                    m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{ch.get("image","")}" group-title="{group}",{name}')
                     m3u.append(f"{host}stream/{sid}/{cid}{suffix}")
-                    found += 1
-        except: continue
-
-    if found == 0:
-        return "#EXTM3U\n# ERRO: Bloqueio Total de IP no Render.\n# A UNICA SAIDA E USAR O 'RAILWAY.APP' OU 'ZEABUR.COM'."
-
+                
+                if page >= int(data.get("data", {}).get("meta", {}).get("total_pages", 1)): break
+            except: break
+            
     return Response("\n".join(m3u), mimetype="text/plain")
 
 @app.route("/stream/<int:sid>/<path:cid>")
 def stream(sid, cid):
-    clean_id = cid.split('|')[0]
+    clean_id = cid.split('|')[0].split('?')[0]
     try:
-        url = f"{BASE_URL}{API_PATH}/channels/{clean_id}/stream"
-        r = s.session.get(url, params={"server_id": sid, "t": int(time.time())}, headers=s.get_headers(), timeout=10)
-        video_url = r.json().get("data", {}).get("stream_url") or r.json().get("stream_url")
-        if video_url: return redirect(video_url)
+        r = requests.get(f"{BASE_URL}/channels/{clean_id}/stream", 
+                        params={"server_id": sid, "t": int(time.time())},
+                        headers=api.get_headers(), timeout=10)
+        url = r.json().get("data", {}).get("stream_url") or r.json().get("stream_url")
+        if url: return redirect(url)
     except: pass
     return "Erro", 404
 
+@app.route("/epg.xml")
+def epg():
+    return Response('<?xml version="1.0" encoding="UTF-8"?><tv></tv>', mimetype="application/xml")
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
+    # O Railway usa a variável PORT
+    port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
