@@ -1,128 +1,165 @@
+import requests
+import xml.etree.ElementTree as ET
 from flask import Flask, Response, redirect, request
-import cloudscraper
-from bs4 import BeautifulSoup
-import re
 import os
 import time
+import uuid
 
 app = Flask(__name__)
 
-SERVERS = [
-    {"id": 1, "url": "https://app.pobreflix2.site/canais/categorias/?thema=1&server=speed-1", "name": "SPEED-1"},
-    {"id": 2, "url": "https://app.pobreflix2.site/canais/categorias/?thema=1&server=speed-2", "name": "SPEED-2"},
-    {"id": 3, "url": "https://app.pobreflix2.site/canais/categorias/?thema=1&server=speed-3", "name": "SPEED-3"},
-]
+# Configurações do Servidor
+# Usando o domínio fornecido pelo usuário que contém os servidores 1, 2 e 3
+BASE_URL = "https://ycineflix.tudo30.shop/wp-json/xui-pflix/v1"
+USER_AGENT = "okhttp/4.12.0"
+APP_ID = "site.speedflix"
 
-# Scraper anti-bloqueio
-SCRAPER = cloudscraper.create_scraper(
-    browser={"browser": "chrome", "platform": "windows", "desktop": True},
-    delay=3,
-    interpreter="js2py"
-)
+class SpeedFlixAPI:
+    def __init__(self):
+        self.token = None
+        self.device_id = str(uuid.uuid4()).replace('-', '')[:16]
 
-def pegar_html(url):
-    for tentativa in range(4):
+    def login(self):
+        """Obtém o token de acesso Bearer simulando o app original."""
+        if self.token:
+            return self.token
         try:
-            if tentativa > 0: time.sleep(2.5 * tentativa)
-            r = SCRAPER.get(url, timeout=30)
-            r.raise_for_status()
-            if len(r.text) < 1200 or "Verificando" in r.text:
-                print(f"[Desafio {tentativa+1}] {url[:60]}")
-                continue
-            return r.text
-        except Exception as e:
-            print(f"[Erro {tentativa+1}] {url[:60]}: {str(e)}")
-    return ""
+            payload = {
+                "username": f"guest_{self.device_id[:8]}",
+                "password": "guest",
+                "device_id": self.device_id,
+                "model": "Samsung SM-G998B",
+                "version": "13"
+            }
+            headers = {
+                "User-Agent": USER_AGENT,
+                "X-Requested-With": APP_ID,
+                "Content-Type": "application/json"
+            }
+            # Tenta realizar o login para obter o token de autorização
+            r = requests.post(f"{BASE_URL}/auth/login", json=payload, 
+                             headers=headers, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                res_data = data.get("data", {})
+                self.token = res_data.get("token") or data.get("token")
+                return self.token
+        except: pass
+        return None
 
-def extrair_links(html):
-    soup = BeautifulSoup(html, "html.parser")
-    res = {"categorias": [], "canais": []}
-    for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
-        nome = a.get_text(strip=True)
-        if not nome or len(nome) < 2 or href.startswith("javascript"): continue
-        if not href.startswith("http"):
-            href = "https://app.pobreflix2.site" + href
-        if any(p in href.lower() for p in ["/categoria", "categorias", "cat="]):
-            res["categorias"].append({"nome": nome, "url": href})
-        elif any(p in href.lower() for p in ["/canal", "player", "id=", "assistir"]):
-            res["canais"].append({"nome": nome, "url": href})
-    # Remover duplicatas
-    vistos = set()
-    for tipo in res:
-        res[tipo] = [x for x in res[tipo] if not (x["url"] in vistos or vistos.add(x["url"]))]
-    return res
+    def get_headers(self):
+        """Monta os cabeçalhos necessários para as requisições da API."""
+        headers = {
+            "User-Agent": USER_AGENT, 
+            "X-Requested-With": APP_ID,
+            "Accept": "application/json"
+        }
+        token = self.login()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
 
-def achar_stream(url_canal):
-    html = pegar_html(url_canal)
-    if not html: return None
-    padroes = [
-        r'https?://[^\s"\']+\.m3u8[^\s"\']*',
-        r'stream_url\s*[:=]\s*["\']([^"\']+)["\']',
-        r'streamUrl\s*:\s*["\']([^"\']+)["\']',
-        r'file\s*:\s*["\']([^"\']+)["\']'
-    ]
-    for p in padroes:
-        m = re.search(p, html, re.I)
-        if m: return m.group(1) or m.group(0)
-    return None
+api = SpeedFlixAPI()
 
-# 📱 ROTAS — FORMATO 100% TIVIMATE
 @app.route("/")
-def home():
-    return "<h1>✅ Playlist Pronta para TiviMate</h1><p>Use: /playlist.m3u</p>"
-
-@app.route("/teste")
-def teste():
-    saida = []
-    for srv in SERVERS:
-        saida.append(f"\n===== {srv['name']} =====")
-        html = pegar_html(srv["url"])
-        saida.append("✅ OK" if html else "❌ Bloqueado")
-        if html: saida.append(f"Tamanho: {len(html)}")
-    return Response("\n".join(saida), mimetype="text/plain")
+def index():
+    return "<h1>Proxy SpeedFlix Ativo</h1><p>M3U: /playlist.m3u</p>"
 
 @app.route("/playlist.m3u")
 def playlist():
-    host = request.host_url.rstrip('/')  # Remove barra final
-    m3u = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-TARGETDURATION:15"]
-    total = 0
-    for srv in SERVERS:
-        html = pegar_html(srv["url"])
-        if not html: continue
-        dados = extrair_links(html)
-        # Categorias
-        for cat in dados["categorias"][:10]:
-            hcat = pegar_html(cat["url"])
-            if not hcat: continue
-            canais = extrair_links(hcat)["canais"]
-            for ch in canais:
-                m3u.append(f'#EXTINF:-1 tvg-id="ch{total}" tvg-logo="" group-title="{cat["nome"]} | {srv["name"]}",{ch["nome"]}')
-                m3u.append(f'{host}/stream/{srv["id"]}/{total}?u={ch["url"]}')
-                total += 1
-        # Canais diretos se sem categorias
-        for ch in dados["canais"]:
-            m3u.append(f'#EXTINF:-1 tvg-id="ch{total}" tvg-logo="" group-title="Direto {srv["name"]}",{ch["nome"]}')
-            m3u.append(f'{host}/stream/{srv["id"]}/{total}?u={ch["url"]}')
-            total += 1
-    if total == 0:
-        m3u.append("#EXTINF:-1,ERRO: Nenhum canal encontrado")
-    return Response(
-        "\n".join(m3u) + "\n",
-        mimetype="application/vnd.apple.mpegurl; charset=utf-8",
-        headers={"Content-Disposition": "inline; filename=playlist.m3u; charset=utf-8"}
-    )
+    host = request.host_url
+    m3u = ["#EXTM3U"]
+    
+    # Sufixo para o TiviMate enviar os cabeçalhos corretos ao player final
+    # Isso é essencial para que o servidor de vídeo aceite a conexão
+    suffix = f"|User-Agent={USER_AGENT}&X-Requested-With={APP_ID}"
+    token = api.login()
+    if token:
+        suffix += f"&Authorization=Bearer {token}"
+
+    total_canais = 0
+    # Percorre os servidores 1, 2 e 3 conforme solicitado
+    for sid in [1, 2, 3]:
+        page = 1
+        while page <= 15: # Loop para capturar todos os canais (paginação)
+            try:
+                headers = api.get_headers()
+                r = requests.get(f"{BASE_URL}/channels", 
+                                params={"server_id": sid, "per_page": 100, "page": page},
+                                headers=headers, timeout=20)
+                
+                if r.status_code != 200:
+                    break
+                
+                data = r.json()
+                # Extrai os canais da resposta JSON
+                items = data.get("data", {}).get("items") or data.get("items") or []
+                if not items:
+                    break
+                
+                for ch in items:
+                    cid = ch.get("id")
+                    if not cid: continue
+                    
+                    # Nome do canal e grupo com identificação do servidor
+                    name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
+                    cat = ch.get('category_name') or 'Canais'
+                    group = f"{cat.upper()} [S{sid}]"
+                    logo = ch.get("image") or ""
+                    
+                    m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{group}",{name}')
+                    # O link do stream aponta para a rota interna que resolve a URL real
+                    m3u.append(f"{host}stream/{sid}/{cid}{suffix}")
+                    total_canais += 1
+                
+                # Verifica se há mais páginas
+                meta = data.get("data", {}).get("meta") or data.get("meta") or {}
+                total_pages = int(meta.get("total_pages", 1))
+                if page >= total_pages:
+                    break
+                page += 1
+            except:
+                break
+
+    # Se a lista vier vazia, adiciona um comentário de erro para debug
+    if total_canais == 0:
+        m3u.append("# ERRO: Nenhum canal encontrado. Verifique a conexao com o servidor.")
+
+    return Response("\n".join(m3u), mimetype="text/plain")
 
 @app.route("/stream/<int:sid>/<path:cid>")
-def stream(sid, cid):
-    u = request.args.get("u")
-    if not u: return "URL inválida", 400
-    link = achar_stream(u)
-    return redirect(link, code=302) if link else Response("#ERRO: Stream não encontrada", status=404)
+def stream_proxy(sid, cid):
+    # O TiviMate envia os cabeçalhos colados no ID; aqui limpamos para pegar apenas o ID real
+    clean_cid = cid.split('|')[0].split('?')[0]
+    
+    try:
+        headers = api.get_headers()
+        # O parâmetro 't' é um timestamp obrigatório para validar o acesso ao stream
+        r = requests.get(f"{BASE_URL}/channels/{clean_cid}/stream", 
+                        params={"server_id": sid, "t": int(time.time())},
+                        headers=headers, timeout=15)
+        
+        if r.status_code == 200:
+            data = r.json()
+            res_data = data.get("data", {})
+            # Extrai a URL final do vídeo (HLS/m3u8)
+            video_url = res_data.get("stream_url") or res_data.get("free_url") or \
+                        data.get("stream_url") or data.get("free_url")
+            
+            if video_url:
+                # Redireciona o TiviMate para a URL real do vídeo
+                return redirect(video_url)
+        
+        return f"Erro ao obter stream (Status {r.status_code})", 404
+    except Exception as e:
+        return f"Erro de Conexão: {str(e)}", 500
 
 @app.route("/epg.xml")
 def epg():
-    return Response('<?xml version="1.0" encoding="UTF-8"?><tv></tv>', mimetype="application/xml; charset=utf-8")
+    # Retorna um arquivo XML vazio mas válido para o TiviMate
+    return Response('<?xml version="1.0" encoding="UTF-8"?><tv generator-info-name="SpeedFlix Proxy"></tv>', 
+                    mimetype="application/xml")
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    # Render usa a porta 10000 por padrão
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
