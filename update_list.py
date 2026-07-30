@@ -1,82 +1,96 @@
 import requests
-import re
+import uuid
+import json
 import time
 
 def get_channels():
+    # Início da lista M3U
     m3u = ["#EXTM3U"]
+    
+    # Domínio principal da API
+    base_api = "https://app.pobreflix2.site/wp-json/xui-pflix/v1"
+    
+    # Identificação única para este "dispositivo" simulado
+    device_id = str(uuid.uuid4()).replace('-', '')[:16]
+    
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Referer": "https://app.pobreflix2.site/"
+        "User-Agent": "okhttp/4.12.0",
+        "X-Requested-With": "site.speedflix",
+        "Accept": "application/json"
     }
 
-    total_geral = 0
+    print("--- Iniciando Processo de Captura ---")
     
-    # Percorre os servidores 1, 2 e 3
+    # 1. Realizar Login de Convidado para liberar o acesso
+    print("Solicitando Token de acesso...")
+    token = None
+    try:
+        login_url = f"{base_api}/auth/login"
+        payload = {
+            "username": f"guest_{device_id[:6]}", 
+            "password": "guest", 
+            "device_id": device_id
+        }
+        r = requests.post(login_url, json=payload, headers=headers, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            token = data.get("data", {}).get("token") or data.get("token")
+            print("Token obtido com sucesso!")
+    except Exception as e:
+        print(f"Erro no login: {e}")
+
+    # Se conseguimos o token, adicionamos aos cabeçalhos
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    total_geral = 0
+
+    # 2. Percorrer os servidores 1, 2 e 3
     for sid in [1, 2, 3]:
-        print(f"--- Iniciando Varredura no Servidor {sid} ---")
-        
-        # O site costuma ter paginação. Vamos tentar ler até 10 páginas por servidor.
-        for page in range(1, 11):
-            url = f"https://app.pobreflix2.site/canais/page/{page}/?thema=1&server=speed-{sid}"
-            print(f"Lendo Página {page}: {url}")
+        print(f"Buscando canais do Servidor {sid}...")
+        try:
+            # Pedimos 500 canais por servidor (para pegar os 176, 192 e 127 de uma vez)
+            url = f"{base_api}/channels"
+            params = {"server_id": sid, "per_page": 500}
             
-            try:
-                res = requests.get(url, headers=headers, timeout=25)
-                if res.status_code != 200:
-                    print(f"Fim das páginas para o Servidor {sid} (Status {res.status_code})")
-                    break
+            res = requests.get(url, params=params, headers=headers, timeout=25)
+            
+            if res.status_code == 200:
+                data = res.json()
+                # A API pode retornar os itens em 'items' ou 'data.items'
+                items = data.get("data", {}).get("items") or data.get("items") or []
                 
-                html = res.text
+                print(f"Sucesso! {len(items)} canais encontrados no Servidor {sid}")
                 
-                # Regex robusto para pegar ID e Nome baseado no seu HTML
-                # Procura: /canais/ID/ e o texto dentro de iptv-card-title
-                items = re.findall(r'/canais/(\d+)/.*?iptv-card-title">(.*?)</span>', html, re.DOTALL)
-                
-                if not items:
-                    # Tenta um padrão secundário se o site mudar
-                    items = re.findall(r'href=".*?/canais/(\d+)/".*?alt="(.*?)"', html, re.DOTALL)
-
-                if items:
-                    count_page = 0
-                    for cid, name_raw in items:
-                        # Limpeza do nome
-                        name = re.sub('<[^<]+?>', '', name_raw).replace("Assistir ", "").strip()
-                        if not name: continue
-                        
-                        # Adiciona identificação [S1], [S2] ou [S3] no nome e no grupo
-                        display_name = f"{name} [S{sid}]"
-                        group_name = f"CANAIS [S{sid}]"
-                        
-                        # Tenta pegar a logo
-                        logo_match = re.search(fr'canais/{cid}/.*?src="(.*?)"', html)
-                        logo = logo_match.group(1) if logo_match else ""
-
-                        m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{group_name}",{display_name}')
-                        m3u.append(f"https://speed.megafilmeshd9.com/midia/speed-{sid}/{cid}.m3u8")
-                        count_page += 1
-                        total_geral += 1
+                for ch in items:
+                    cid = ch.get("id")
+                    if not cid: continue
                     
-                    print(f"Página {page}: {count_page} canais encontrados.")
-                    if count_page < 10: # Se a página tem poucos canais, provavelmente é a última
-                        break
-                else:
-                    print(f"Nenhum canal encontrado na página {page}.")
-                    break
+                    # Nome do canal e Grupo com identificação do servidor
+                    name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
+                    cat = (ch.get('category_name') or f'Servidor {sid}').upper()
+                    group = f"{cat} [S{sid}]"
+                    logo = ch.get("image") or ""
                     
-                time.sleep(1) # Pausa para o servidor não nos bloquear
-            except Exception as e:
-                print(f"Erro na página {page}: {e}")
-                break
+                    # Monta a entrada do canal na lista M3U
+                    m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{group}",{name}')
+                    # Link direto do servidor de vídeo oficial que funciona no TiviMate
+                    m3u.append(f"https://speed.megafilmeshd9.com/midia/speed-{sid}/{cid}.m3u8")
+                    
+                    total_geral += 1
+            else:
+                print(f"Erro {res.status_code} no servidor {sid}")
+        except Exception as e:
+            print(f"Falha ao conectar no servidor {sid}: {e}")
 
-    # Se a lista falhar, coloca o backup para não ficar vazia
-    if total_geral == 0:
-        m3u.append('#EXTINF:-1 tvg-id="s1_11892477",Globo AC FHD [S1]')
-        m3u.append("https://speed.megafilmeshd9.com/midia/speed-1/11892477.m3u8")
-
-    # Salva o arquivo final
-    with open("playlist.m3u", "w", encoding="utf-8") as f:
-        f.write("\n".join(m3u))
-    print(f"--- VARREDURA FINALIZADA: {total_geral} canais salvos ---")
+    # 3. Salvar o resultado final
+    if total_geral > 0:
+        with open("playlist.m3u", "w", encoding="utf-8") as f:
+            f.write("\n".join(m3u))
+        print(f"--- Fim! {total_geral} canais salvos no arquivo playlist.m3u ---")
+    else:
+        # Se falhou tudo, não sobrescreve o arquivo para não perder o que já tinha
+        print("ERRO CRITICO: Nenhum canal capturado. Verifique o log acima.")
 
 if __name__ == "__main__":
     get_channels()
