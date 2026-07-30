@@ -4,18 +4,35 @@ from flask import Flask, Response, redirect, request
 import os
 import time
 import uuid
+import random
 
 app = Flask(__name__)
 
-# Lista de domínios para tentar (se um der erro 403, ele tenta o outro)
+# Domínios ativos
 DOMAINS = [
     "https://ycineflix.tudo30.shop",
     "https://app.pobreflix2.site",
-    "https://speedflix.top"
+    "https://speedflix02.com"
 ]
-API_PATH = "/wp-json/xui-pflix/v1"
+
 USER_AGENT = "okhttp/4.12.0"
 APP_ID = "site.speedflix"
+
+def get_br_headers(token=None):
+    """Gera cabeçalhos simulando um celular Android no Brasil."""
+    # IPs típicos de rede residencial brasileira (Vivo, Claro, etc)
+    fake_ip = f"{random.choice([177, 179, 186, 187, 189, 191, 200, 201])}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(0,255)}"
+    h = {
+        "User-Agent": USER_AGENT,
+        "X-Requested-With": APP_ID,
+        "X-Forwarded-For": fake_ip,
+        "X-Real-IP": fake_ip,
+        "Accept": "application/json",
+        "Connection": "Keep-Alive"
+    }
+    if token:
+        h["Authorization"] = f"Bearer {token}"
+    return h
 
 class SpeedFlixAPI:
     def __init__(self):
@@ -24,72 +41,78 @@ class SpeedFlixAPI:
         self.device_id = str(uuid.uuid4()).replace('-', '')[:16]
 
     def login(self):
-        """Tenta login nos domínios até conseguir um token."""
+        """Tenta login usando a técnica rest_route para bypass."""
         for base in DOMAINS:
             try:
+                # Bypass: acessa a API através de um parâmetro de busca
+                url = f"{base}/"
+                params = {"rest_route": "/xui-pflix/v1/auth/login"}
                 payload = {
                     "username": f"guest_{self.device_id[:6]}",
                     "password": "guest",
-                    "device_id": self.device_id,
-                    "model": "Samsung SM-G998B"
+                    "device_id": self.device_id
                 }
-                headers = {"User-Agent": USER_AGENT, "X-Requested-With": APP_ID}
-                # Tenta o config primeiro (limpa o caminho na Cloudflare)
-                requests.get(f"{base}{API_PATH}/app/config", headers=headers, timeout=10)
-                
-                r = requests.post(f"{base}{API_PATH}/auth/login", json=payload, headers=headers, timeout=10)
+                r = requests.post(url, params=params, json=payload, headers=get_br_headers(), timeout=10)
                 if r.status_code == 200:
-                    self.token = r.json().get("data", {}).get("token") or r.json().get("token")
+                    data = r.json()
+                    self.token = data.get("data", {}).get("token") or data.get("token")
                     self.active_base = base
                     return True
-            except:
-                continue
+            except: continue
         return False
 
-    def get_headers(self):
-        h = {"User-Agent": USER_AGENT, "X-Requested-With": APP_ID, "Accept": "application/json"}
-        if self.token:
-            h["Authorization"] = f"Bearer {self.token}"
-        return h
+    def get_channels(self, sid):
+        """Busca canais via rest_route."""
+        url = f"{self.active_base}/"
+        params = {
+            "rest_route": "/xui-pflix/v1/channels",
+            "server_id": sid,
+            "per_page": 200
+        }
+        try:
+            r = requests.get(url, params=params, headers=get_br_headers(self.token), timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                return data.get("data", {}).get("items") or data.get("items") or []
+        except: pass
+        return []
 
 api = SpeedFlixAPI()
 
 @app.route("/")
 def index():
-    return "<h1>Proxy Ativo</h1><p>M3U: /playlist.m3u</p><p>EPG: /epg.xml</p>"
+    return "<h1>Proxy Railway Ativo</h1><p>M3U: /playlist.m3u</p>"
 
 @app.route("/playlist.m3u")
 def playlist():
-    host = request.host_url
     m3u = ["#EXTM3U"]
+    host = request.host_url
     
-    if not api.login():
-        m3u.append("# ERRO: Falha ao autenticar em todos os dominios.")
-        return Response("\n".join(m3u), mimetype="text/plain")
+    # Tenta o login, mas continua mesmo se falhar (alguns servidores estao abertos)
+    api.login()
+    
+    suffix = f"|User-Agent={USER_AGENT}&X-Requested-With={APP_ID}"
+    if api.token:
+        suffix += f"&Authorization=Bearer {api.token}"
 
-    # Sufixo com headers para o TiviMate
-    suffix = f"|User-Agent={USER_AGENT}&X-Requested-With={APP_ID}&Authorization=Bearer {api.token}"
-
-    found = 0
+    total = 0
     for sid in [1, 2, 3]:
-        try:
-            # Tenta pegar 200 canais por servidor
-            url = f"{api.active_base}{API_PATH}/channels"
-            r = requests.get(url, params={"server_id": sid, "per_page": 200}, headers=api.get_headers(), timeout=15)
-            if r.status_code == 200:
-                items = r.json().get("data", {}).get("items") or r.json().get("items") or []
-                for ch in items:
-                    cid = ch.get("id")
-                    name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
-                    cat = (ch.get('category_name') or 'Canais').upper()
-                    m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{ch.get("image","")}" group-title="{cat} [S{sid}]",{name}')
-                    m3u.append(f"{host}stream/{sid}/{cid}{suffix}")
-                    found += 1
-        except:
-            continue
+        items = api.get_channels(sid)
+        for ch in items:
+            cid = ch.get("id")
+            if not cid: continue
+            
+            name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
+            cat = (ch.get('category_name') or 'Canais').upper()
+            logo = ch.get("image") or ""
+            
+            m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{cat} [S{sid}]",{name}')
+            m3u.append(f"{host}stream/{sid}/{cid}{suffix}")
+            total += 1
 
-    if found == 0:
-        m3u.append(f"# ERRO: Nenhum canal retornado por {api.active_base}")
+    if total == 0:
+        m3u.append("# ERRO: Todos os dominios de acesso falharam.")
+        m3u.append("# DETALHE: O servidor identificou o acesso como Datacenter.")
 
     return Response("\n".join(m3u), mimetype="text/plain")
 
@@ -97,16 +120,17 @@ def playlist():
 def stream(sid, cid):
     clean_id = cid.split('|')[0]
     try:
-        url = f"{api.active_base}{API_PATH}/channels/{clean_id}/stream"
-        r = requests.get(url, params={"server_id": sid, "t": int(time.time())}, headers=api.get_headers(), timeout=10)
-        v_url = r.json().get("data", {}).get("stream_url") or r.json().get("stream_url")
-        if v_url: return redirect(v_url)
+        url = f"{api.active_base}/"
+        params = {"rest_route": f"/xui-pflix/v1/channels/{clean_id}/stream", "server_id": sid, "t": int(time.time())}
+        r = requests.get(url, params=params, headers=get_br_headers(api.token), timeout=10)
+        if r.status_code == 200:
+            v_url = r.json().get("data", {}).get("stream_url") or r.json().get("stream_url")
+            if v_url: return redirect(v_url)
     except: pass
     return "Erro", 404
 
 @app.route("/epg.xml")
 def epg():
-    # Retorna XML vazio para evitar erros 500
     return Response('<?xml version="1.0" encoding="UTF-8"?><tv></tv>', mimetype="application/xml")
 
 if __name__ == "__main__":
