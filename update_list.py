@@ -1,104 +1,102 @@
 import requests
-import re
-import xml.etree.ElementTree as ET
-from bs4 import BeautifulSoup
+import uuid
+import json
 import time
 
-def get_all_data():
+def get_channels():
+    # Início da lista M3U
     m3u = ["#EXTM3U"]
-    tv = ET.Element("tv", generator_info_name="SpeedFlix-Master")
-    
+
+    # Domínio do portal que agrupa os servidores
+    BASE_URL = "https://ycineflix.tudo30.shop"
+    API_PATH = "/wp-json/xui-pflix/v1"
+
+    # Identificação única para simular um dispositivo Android
+    device_id = str(uuid.uuid4()).replace('-', '')[:16]
+
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Referer": "https://app.pobreflix2.site/"
+        "User-Agent": "okhttp/4.12.0",
+        "X-Requested-With": "site.speedflix",
+        "Accept": "application/json",
+        "Connection": "Keep-Alive"
     }
 
-    total_canais = 0
-    # Percorre os servidores 1, 2 e 3
+    print(f"--- Iniciando Captura via {BASE_URL} ---")
+
+    # 1. Realizar Login de Convidado para obter o Token Bearer
+    print("Solicitando Token de acesso...")
+    token = None
+    try:
+        # O app costuma chamar o config antes do login
+        requests.get(f"{BASE_URL}{API_PATH}/app/config", headers=headers, timeout=10)
+
+        login_url = f"{BASE_URL}{API_PATH}/auth/login"
+        payload = {
+            "username": f"guest_{device_id[:6]}",
+            "password": "guest",
+            "device_id": device_id,
+            "model": "Samsung SM-G998B",
+            "version": "13"
+        }
+        r = requests.post(login_url, json=payload, headers=headers, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            token = data.get("data", {}).get("token") or data.get("token")
+            print("Token obtido com sucesso!")
+    except Exception as e:
+        print(f"Erro no login: {e}")
+
+    # Se conseguimos o token, adicionamos aos cabeçalhos de autorização
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    total_geral = 0
+
+    # 2. Percorrer os servidores 1, 2 e 3
     for sid in [1, 2, 3]:
-        print(f"--- Explorando Servidor {sid} ---")
-        # Página que lista as categorias (Imagem 3 que você mandou)
-        cat_url = f"https://app.pobreflix2.site/canais/categorias/?thema=1&server=speed-{sid}"
-        
+        print(f"Buscando canais do Servidor {sid}...")
         try:
-            res_cat = requests.get(cat_url, headers=headers, timeout=20)
-            if res_cat.status_code == 200:
-                soup_cat = BeautifulSoup(res_cat.text, 'html.parser')
-                # Busca todos os links de categorias
-                cat_links = soup_cat.find_all('a', href=True)
-                
-                for cl in cat_links:
-                    href = cl['href']
-                    if '/canais/categorias/' in href and sid == sid: # Verifica se é link de cat
-                        cat_name = cl.text.strip().upper()
-                        if not cat_name: continue
-                        
-                        print(f"Lendo Categoria: {cat_name} [S{sid}]")
-                        
-                        # Entra na página da categoria para pegar os canais
-                        res_ch = requests.get(href, headers=headers, timeout=20)
-                        if res_ch.status_code == 200:
-                            soup_ch = BeautifulSoup(res_ch.text, 'html.parser')
-                            # Busca os cards de canais (Imagem 4 e 5)
-                            chan_cards = soup_ch.find_all('a', class_='iptv-card')
-                            
-                            for card in chan_cards:
-                                c_href = card['href']
-                                cid = "".join(filter(str.isdigit, c_href.split('/')[-2]))
-                                
-                                name_elem = card.find('span', class_='iptv-card-title')
-                                name = name_elem.text.strip() if name_elem else f"Canal {cid}"
-                                
-                                logo = ""
-                                img = card.find('img')
-                                if img: logo = img.get('src') or img.get('data-src') or ""
+            # Pedimos 500 canais por servidor para capturar todos de uma vez
+            url = f"{BASE_URL}{API_PATH}/channels"
+            params = {"server_id": sid, "per_page": 500}
 
-                                uid = f"s{sid}_{cid}"
-                                display_name = f"{name} [S{sid}]"
-                                group_title = f"{cat_name} [S{sid}]"
+            res = requests.get(url, params=params, headers=headers, timeout=25)
 
-                                # Adiciona ao M3U
-                                m3u.append(f'#EXTINF:-1 tvg-id="{uid}" tvg-logo="{logo}" group-title="{group_title}",{display_name}')
-                                # Link direto (sem headers conforme seu teste)
-                                m3u.append(f"https://speed.megafilmeshd9.com/midia/speed-{sid}/{cid}.m3u8")
-                                
-                                # Adiciona ao EPG
-                                c_elem = ET.SubElement(tv, "channel", id=uid)
-                                ET.SubElement(c_elem, "display-name").text = display_name
-                                
-                                total_canais += 1
-                        time.sleep(0.5) # Pausa para não ser bloqueado
+            if res.status_code == 200:
+                data = res.json()
+                # A API pode retornar os itens em 'data.items' ou 'items'
+                items = data.get("data", {}).get("items") or data.get("items") or []
+
+                print(f"S{sid}: Encontrados {len(items)} canais.")
+
+                for ch in items:
+                    cid = ch.get("id")
+                    if not cid: continue
+
+                    # Nome do canal e Grupo identificados pelo servidor (ex: [S1])
+                    name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
+                    cat = (ch.get('category_name') or f'Servidor {sid}').upper()
+                    group = f"{cat} [S{sid}]"
+                    logo = ch.get("image") or ""
+
+                    # Monta a entrada na Playlist M3U
+                    m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{group}",{name}')
+                    # Link direto para o vídeo (conforme descoberto no seu código-fonte)
+                    m3u.append(f"https://speed.megafilmeshd9.com/midia/speed-{sid}/{cid}.m3u8")
+
+                    total_geral += 1
             else:
-                print(f"Erro ao acessar categorias do S{sid}")
+                print(f"Erro {res.status_code} no servidor {sid}")
         except Exception as e:
-            print(f"Falha no servidor {sid}: {e}")
+            print(f"Falha de conexão no S{sid}: {e}")
 
-    # Salva os arquivos
-    with open("playlist.m3u", "w", encoding="utf-8") as f:
-        f.write("\n".join(m3u))
-    
-    # Salva o EPG.xml
-    # Nota: Programação real exige centenas de chamadas, por isso geramos o guia base primeiro
-    indent(tv)
-    tree = ET.ElementTree(tv)
-    tree.write("epg.xml", encoding="utf-8", xml_declaration=True)
-    
-    print(f"Sucesso! {total_canais} canais extraídos.")
-
-def indent(elem, level=0):
-    i = "\n" + level*"  "
-    if len(elem):
-        if not elem.text or not elem.text.strip():
-            elem.text = i + "  "
-        if not elem.tail or not elem.tail.strip():
-            elem.tail = i
-        for elem in elem:
-            indent(elem, level+1)
-        if not elem.tail or not elem.tail.strip():
-            elem.tail = i
+    # 3. Salvar o arquivo final no repositório
+    if total_geral > 0:
+        with open("playlist.m3u", "w", encoding="utf-8") as f:
+            f.write("\n".join(m3u))
+        print(f"--- SUCESSO: {total_geral} canais salvos no arquivo playlist.m3u ---")
     else:
-        if level and (not elem.tail or not elem.tail.strip()):
-            elem.tail = i
+        print("ERRO: Nenhum canal capturado. Verifique se o portal está online.")
 
 if __name__ == "__main__":
-    get_all_data()
+    get_channels()
