@@ -1,82 +1,83 @@
 import requests
-import uuid
-import time
+import re
+import json
 
 def get_channels():
     m3u = ["#EXTM3U"]
-    # Domínios ativos para tentar
-    DOMAINS = ["https://app.pobreflix2.site", "https://ycineflix.tudo30.shop"]
-    # URL DO SEU RAILWAY (Para os links de stream)
-    RAILWAY_URL = "https://mkplaylist-production.up.railway.app"
     
-    device_id = str(uuid.uuid4()).replace('-', '')[:16]
-    headers_base = {
+    # Canais de backup (extraídos do seu código-fonte para segurança)
+    backup_channels = [
+        {"id": "11892477", "name": "Globo AC - Amazonica Rio Branco FHD"},
+        {"id": "11892478", "name": "Globo AC - Amazonica Rio Branco HD"},
+        {"id": "11892479", "name": "Globo AC - Amazonica Rio Branco SD"},
+        {"id": "11892480", "name": "Globo AL - Gazeta de Alagoas FHD"},
+        {"id": "11892481", "name": "Globo AL - Gazeta de Alagoas HD"},
+        {"id": "11892482", "name": "Globo AL - Gazeta de Alagoas SD"},
+    ]
+
+    # Headers de navegador real
+    headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "X-Requested-With": "site.speedflix",
-        "Accept": "application/json"
+        "Referer": "https://app.pobreflix2.site/"
     }
 
-    session = requests.Session()
-    session.headers.update(headers_base)
+    total_encontrado = 0
 
-    total_canais = 0
-    
-    for base in DOMAINS:
-        print(f"Tentando captura via {base}...")
+    # Percorre os servidores 1, 2 e 3
+    for sid in [1, 2, 3]:
+        print(f"Buscando canais do Servidor {sid}...")
+        # URL da página de todos os canais que você enviou
+        url = f"https://app.pobreflix2.site/canais/?thema=1&server=speed-{sid}"
+        
         try:
-            # 1. 'Visita' a home para ganhar Cookies
-            session.get(f"{base}/", timeout=10)
-            
-            # 2. Login de Convidado via rest_route
-            login_url = f"{base}/"
-            login_params = {"rest_route": "/xui-pflix/v1/auth/login"}
-            payload = {
-                "username": f"guest_{device_id[:6]}",
-                "password": "guest",
-                "device_id": device_id
-            }
-            
-            r_login = session.post(login_url, params=login_params, json=payload, timeout=10)
-            token = None
-            if r_login.status_code == 200:
-                token = r_login.json().get("data", {}).get("token") or r_login.json().get("token")
-                print("Login: SUCESSO")
-            
-            if token:
-                session.headers.update({"Authorization": f"Bearer {token}"})
-
-            # 3. Pega os canais dos servidores 1, 2 e 3
-            for sid in [1, 2, 3]:
-                # Usamos o modo 'sync' que retorna tudo de uma vez
-                params = {"rest_route": "/xui-pflix/v1/channels", "server_id": sid, "per_page": 500}
-                r = session.get(f"{base}/", params=params, timeout=15)
+            res = requests.get(url, headers=headers, timeout=25)
+            if res.status_code == 200:
+                html = res.text
                 
-                if r.status_code == 200:
-                    data = r.json()
-                    items = data.get("data", {}).get("items") or data.get("items") or []
-                    print(f"S{sid}: {len(items)} canais encontrados.")
-                    
-                    for ch in items:
-                        cid = ch.get("id")
-                        if not cid: continue
-                        name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
-                        cat = (ch.get('category_name') or f'SERVIDOR {sid}').upper()
-                        m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{ch.get("image","")}" group-title="{cat} [S{sid}]",{name}')
-                        m3u.append(f"{RAILWAY_URL}/stream/{sid}/{cid}")
-                        total_canais += 1
-            
-            if total_canais > 0: break # Se conseguiu em um domínio, não precisa tentar o outro
-            
-        except Exception as e:
-            print(f"Erro em {base}: {e}")
-            continue
+                # Regex para encontrar o padrão do site: href e o título (span ou alt)
+                # Procura links do tipo /canais/NUMERO/ e pega o nome no atributo 'alt' ou no span
+                matches = re.findall(r'href="https://app.pobreflix2.site/canais/(\d+)/".*?alt="(.*?)"', html)
+                
+                if not matches:
+                    # Tenta um padrão secundário (apenas o link e o nome no span)
+                    matches = re.findall(r'canais/(\d+)/.*?iptv-card-title">(.*?)</span>', html, re.DOTALL)
 
-    if total_canais == 0:
-        m3u.append("# ERRO: Servidor bloqueou a captura no GitHub.")
-    
+                if matches:
+                    print(f"Sucesso! {len(matches)} canais capturados no S{sid}")
+                    for cid, name in matches:
+                        clean_name = name.replace("Assistir ", "").strip()
+                        display_name = f"{clean_name} [S{sid}]"
+                        group = f"CANAIS [S{sid}]"
+                        
+                        # Tenta achar a logo para este ID específico
+                        logo_match = re.search(fr'canais/{cid}/.*?src="(.*?)"', html)
+                        logo = logo_match.group(1) if logo_match else ""
+
+                        m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{group}",{display_name}')
+                        # Link direto do servidor de vídeo oficial (descoberto no seu HTML)
+                        # O sufixo '|' é para o TiviMate enviar os headers necessários
+                        m3u.append(f"https://speed.megafilmeshd9.com/midia/speed-{sid}/{cid}.m3u8|User-Agent=okhttp/4.12.0&Referer=https://app.pobreflix2.site/")
+                        total_encontrado += 1
+                else:
+                    print(f"Aviso: HTML do S{sid} lido, mas nenhum canal identificado pelo código.")
+            else:
+                print(f"Erro {res.status_code} ao acessar o S{sid}")
+        except Exception as e:
+            print(f"Falha de conexão no S{sid}: {e}")
+
+    # Se a varredura falhou totalmente, usa os canais de backup da Globo
+    if total_encontrado == 0:
+        print("Usando lista de backup...")
+        for ch in backup_channels:
+            m3u.append(f'#EXTINF:-1 tvg-id="s1_{ch["id"]}" group-title="CANAIS [S1]",{ch["name"]} [S1]')
+            m3u.append(f"https://speed.megafilmeshd9.com/midia/speed-1/{ch['id']}.m3u8|User-Agent=okhttp/4.12.0&Referer=https://app.pobreflix2.site/")
+            total_encontrado += 1
+
+    # Salva o arquivo no repositório
     with open("playlist.m3u", "w", encoding="utf-8") as f:
         f.write("\n".join(m3u))
-    print(f"Fim! {total_canais} canais salvos.")
+    
+    print(f"Processo finalizado. Total de canais salvos: {total_encontrado}")
 
 if __name__ == "__main__":
     get_channels()
