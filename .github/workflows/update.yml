@@ -1,8 +1,8 @@
 name: Update Playlist
 on:
   schedule:
-    - cron: '0 */6 * * *'
-  workflow_dispatch:
+    - cron: '0 */6 * * *' # Roda a cada 6 horas
+  workflow_dispatch: # Permite rodar manualmente
 jobs:
   build:
     runs-on: ubuntu-latest
