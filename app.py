@@ -1,110 +1,96 @@
 import requests
-import re
+from bs4 import BeautifulSoup
 from flask import Flask, Response, redirect, request
 import os
 import time
-import uuid
 
 app = Flask(__name__)
 
-# Configurações do Portal
-BASE_DOMAIN = "https://app.pobreflix2.site"
-USER_AGENT_WEB = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-USER_AGENT_APP = "okhttp/4.12.0"
-APP_ID = "site.speedflix"
+# Configurações extraídas do seu código-fonte
+BASE_SITE = "https://app.pobreflix2.site"
+STREAM_DOMAIN = "https://speed.megafilmeshd9.com"
 
-class SpeedFlixAPI:
-    def __init__(self):
-        self.token = None
-        self.device_id = str(uuid.uuid4()).replace('-', '')[:16]
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Referer": BASE_SITE + "/"
+}
 
-    def login(self):
-        """Tenta login de convidado para obter o token de stream."""
-        if self.token: return self.token
-        try:
-            url = f"{BASE_DOMAIN}/?rest_route=/xui-pflix/v1/auth/login"
-            payload = {"username": f"guest_{self.device_id[:8]}", "password": "guest", "device_id": self.device_id}
-            r = requests.post(url, json=payload, headers={"User-Agent": USER_AGENT_APP}, timeout=10)
-            if r.status_code == 200:
-                data = r.json()
-                self.token = data.get("data", {}).get("token") or data.get("token")
-                return self.token
-        except: pass
-        return None
-
-    def get_channels_from_html(self, sid):
-        """Varre o site em busca de canais (Modo Scraper)."""
-        channels = []
-        try:
-            # Usa o link de 'todos os canais' que você forneceu
-            url = f"{BASE_DOMAIN}/canais/?thema=1&server=speed-{sid}"
-            res = requests.get(url, headers={"User-Agent": USER_AGENT_WEB, "Referer": BASE_DOMAIN}, timeout=20)
+def get_channels_from_server(sid):
+    """Varre o site e extrai todos os canais do servidor especificado."""
+    channels = []
+    # URL da página com a lista de todos os canais do servidor
+    url = f"{BASE_SITE}/canais/?thema=1&server=speed-{sid}"
+    
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=20)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
+            # Busca todos os cards de canais
+            cards = soup.find_all('a', class_='iptv-card')
             
-            if res.status_code == 200:
-                # Regex flexível para pegar ID e Nome
-                # Tenta padrão 1: href com /canais/ID/ e title
-                matches = re.findall(r'href=["\'][^"\']*/canais/(\d+)/?[^"\']*["\'][^>]*title=["\']([^"\']*)["\']', res.text)
+            for card in cards:
+                href = card.get('href', '')
+                # Extrai o ID do link (ex: .../canais/11892477/ -> 11892477)
+                cid_match = [s for s in href.split('/') if s.isdigit()]
+                if not cid_match: continue
+                cid = cid_match[0]
                 
-                if not matches:
-                    # Tenta padrão 2: link e alt da imagem
-                    matches = re.findall(r'canais/(\d+)/.*?alt=["\']([^"\']*)["\']', res.text)
-
-                for cid, name in matches:
-                    channels.append({
-                        "id": cid, 
-                        "name": name.replace("Assistir ", "").strip(),
-                        "cat": f"Canais [S{sid}]"
-                    })
-            else:
-                return [f"ERRO_HTTP_{res.status_code}"]
-        except Exception as e:
-            return [f"ERRO_EXCEPTION_{str(e)}"]
-        return channels
-
-api = SpeedFlixAPI()
+                # Pega o nome do canal
+                title_elem = card.find('span', class_='iptv-card-title')
+                name = title_elem.text.strip() if title_elem else f"Canal {cid}"
+                
+                # Pega a logo
+                img_elem = card.find('img')
+                logo = img_elem.get('src', '') if img_elem else ""
+                
+                channels.append({
+                    "id": cid,
+                    "name": name,
+                    "logo": logo,
+                    "server": sid
+                })
+    except Exception as e:
+        print(f"Erro no scraping S{sid}: {e}")
+    
+    return channels
 
 @app.route("/")
 def index():
-    return f"<h1>SpeedFlix Proxy Ativo</h1><p>Playlist: {request.host_url}playlist.m3u</p>"
+    h = request.host_url
+    return f"<h1>SpeedFlix Master Proxy</h1><p>M3U: {h}playlist.m3u</p>"
 
 @app.route("/playlist.m3u")
 def playlist():
     m3u = ["#EXTM3U"]
     host = request.host_url
     
-    # Prepara autenticação para o vídeo
-    token = api.login()
-    suffix = f"|User-Agent={USER_AGENT_APP}&X-Requested-With={APP_ID}"
-    if token: suffix += f"&Authorization=Bearer {token}"
-
-    total = 0
-    logs = []
+    # Headers para o TiviMate enviar ao servidor de vídeo
+    # O Pobreflix exige o Referer correto para o vídeo não travar
+    suffix = f"|User-Agent={HEADERS['User-Agent']}&Referer={BASE_SITE}/"
 
     for sid in [1, 2, 3]:
-        channels = api.get_channels_from_html(sid)
+        channels = get_channels_from_server(sid)
         for ch in channels:
-            if isinstance(ch, str) and ch.startswith("ERRO"):
-                logs.append(f"# DEBUG S{sid}: {ch}")
-                continue
-                
-            cid = ch['id']
             name = f"{ch['name']} [S{sid}]"
-            group = ch['cat'].upper()
+            group = f"CANAIS [S{sid}]"
             
-            m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" group-title="{group}",{name}')
-            # Link de vídeo direto via rest_route
-            stream_url = f"{BASE_DOMAIN}/?rest_route=/xui-pflix/v1/channels/{cid}/stream&server_id={sid}"
-            m3u.append(f"{stream_url}{suffix}")
-            total += 1
+            m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{ch["id"]}" tvg-logo="{ch["logo"]}" group-title="{group}",{name}')
             
-    if total == 0:
-        m3u.extend(logs)
-        m3u.append("# ERRO: Nenhum canal encontrado. O IP do servidor pode estar bloqueado.")
-        m3u.append(f"# SITE TESTADO: {BASE_DOMAIN}")
-        
+            # Geramos o link direto do servidor de vídeo que descobri no seu código
+            # Formato: https://speed.megafilmeshd9.com/midia/speed-X/ID.m3u8
+            direct_stream = f"{STREAM_DOMAIN}/midia/speed-{sid}/{ch['id']}.m3u8"
+            m3u.append(f"{direct_stream}{suffix}")
+            
+    if len(m3u) == 1:
+        m3u.append("# ERRO: IP do Servidor Bloqueado. Tente abrir no celular primeiro.")
+
     return Response("\n".join(m3u), mimetype="text/plain")
 
+@app.route("/epg.xml")
+def epg():
+    # Retorna XML vazio
+    return Response('<?xml version="1.0" encoding="UTF-8"?><tv></tv>', mimetype="application/xml")
+
 if __name__ == "__main__":
-    # Railway usa a porta 8080
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
