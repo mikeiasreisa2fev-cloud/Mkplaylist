@@ -1,83 +1,68 @@
 import requests
 import re
-import json
 
 def get_channels():
     m3u = ["#EXTM3U"]
-    
-    # Canais de backup (extraídos do seu código-fonte para segurança)
-    backup_channels = [
-        {"id": "11892477", "name": "Globo AC - Amazonica Rio Branco FHD"},
-        {"id": "11892478", "name": "Globo AC - Amazonica Rio Branco HD"},
-        {"id": "11892479", "name": "Globo AC - Amazonica Rio Branco SD"},
-        {"id": "11892480", "name": "Globo AL - Gazeta de Alagoas FHD"},
-        {"id": "11892481", "name": "Globo AL - Gazeta de Alagoas HD"},
-        {"id": "11892482", "name": "Globo AL - Gazeta de Alagoas SD"},
-    ]
-
-    # Headers de navegador real
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Referer": "https://app.pobreflix2.site/"
     }
 
-    total_encontrado = 0
-
+    total_geral = 0
     # Percorre os servidores 1, 2 e 3
     for sid in [1, 2, 3]:
-        print(f"Buscando canais do Servidor {sid}...")
-        # URL da página de todos os canais que você enviou
         url = f"https://app.pobreflix2.site/canais/?thema=1&server=speed-{sid}"
+        print(f"Lendo Servidor {sid}: {url}")
         
         try:
-            res = requests.get(url, headers=headers, timeout=25)
+            res = requests.get(url, headers=headers, timeout=30)
             if res.status_code == 200:
                 html = res.text
                 
-                # Regex para encontrar o padrão do site: href e o título (span ou alt)
-                # Procura links do tipo /canais/NUMERO/ e pega o nome no atributo 'alt' ou no span
-                matches = re.findall(r'href="https://app.pobreflix2.site/canais/(\d+)/".*?alt="(.*?)"', html)
+                # BUSCA PRECISA: Procura o padrão exato que você me enviou no HTML
+                # Padrão: href=".../canais/ID/..." class="iptv-card" ... span class="iptv-card-title">NOME</span>
+                items = re.findall(r'href="https://app.pobreflix2.site/canais/(\d+)/.*?class="iptv-card".*?iptv-card-title">(.*?)</span>', html, re.DOTALL)
                 
-                if not matches:
-                    # Tenta um padrão secundário (apenas o link e o nome no span)
-                    matches = re.findall(r'canais/(\d+)/.*?iptv-card-title">(.*?)</span>', html, re.DOTALL)
+                if not items:
+                    # Segunda tentativa: padrão mais simples se o primeiro falhar
+                    items = re.findall(r'/canais/(\d+)/.*?>(.*?)</a>', html, re.DOTALL)
 
-                if matches:
-                    print(f"Sucesso! {len(matches)} canais capturados no S{sid}")
-                    for cid, name in matches:
-                        clean_name = name.replace("Assistir ", "").strip()
-                        display_name = f"{clean_name} [S{sid}]"
-                        group = f"CANAIS [S{sid}]"
+                if items:
+                    seen_ids = set()
+                    for cid, name_raw in items:
+                        if cid in seen_ids: continue
+                        seen_ids.add(cid)
                         
-                        # Tenta achar a logo para este ID específico
+                        # Limpa o nome removendo tags HTML e textos extras
+                        name = re.sub('<[^<]+?>', '', name_raw).replace("Assistir ", "").strip()
+                        
+                        # Tenta capturar o link da imagem (Logo)
+                        logo = ""
                         logo_match = re.search(fr'canais/{cid}/.*?src="(.*?)"', html)
-                        logo = logo_match.group(1) if logo_match else ""
+                        if logo_match:
+                            logo = logo_match.group(1)
 
-                        m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{group}",{display_name}')
-                        # Link direto do servidor de vídeo oficial (descoberto no seu HTML)
-                        # O sufixo '|' é para o TiviMate enviar os headers necessários
+                        m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="CANAIS [S{sid}]",{name} [S{sid}]')
+                        # Link direto para o vídeo (conforme descoberto no seu código-fonte)
                         m3u.append(f"https://speed.megafilmeshd9.com/midia/speed-{sid}/{cid}.m3u8|User-Agent=okhttp/4.12.0&Referer=https://app.pobreflix2.site/")
-                        total_encontrado += 1
+                        total_geral += 1
+                    print(f"Sucesso! {len(seen_ids)} canais encontrados no Servidor {sid}")
                 else:
-                    print(f"Aviso: HTML do S{sid} lido, mas nenhum canal identificado pelo código.")
+                    print(f"Aviso: HTML lido, mas nenhum canal identificado no Servidor {sid}")
             else:
-                print(f"Erro {res.status_code} ao acessar o S{sid}")
+                print(f"Erro {res.status_code} ao acessar Servidor {sid}")
         except Exception as e:
-            print(f"Falha de conexão no S{sid}: {e}")
+            print(f"Falha de conexão no Servidor {sid}: {e}")
 
-    # Se a varredura falhou totalmente, usa os canais de backup da Globo
-    if total_encontrado == 0:
-        print("Usando lista de backup...")
-        for ch in backup_channels:
-            m3u.append(f'#EXTINF:-1 tvg-id="s1_{ch["id"]}" group-title="CANAIS [S1]",{ch["name"]} [S1]')
-            m3u.append(f"https://speed.megafilmeshd9.com/midia/speed-1/{ch['id']}.m3u8|User-Agent=okhttp/4.12.0&Referer=https://app.pobreflix2.site/")
-            total_encontrado += 1
+    # Se a varredura falhar totalmente, mantém o backup para não quebrar a lista
+    if total_geral == 0:
+        m3u.append('#EXTINF:-1 tvg-id="s1_11892477",Globo AC FHD [S1]')
+        m3u.append("https://speed.megafilmeshd9.com/midia/speed-1/11892477.m3u8|User-Agent=okhttp/4.12.0&Referer=https://app.pobreflix2.site/")
 
-    # Salva o arquivo no repositório
+    # Salva a lista no arquivo final
     with open("playlist.m3u", "w", encoding="utf-8") as f:
         f.write("\n".join(m3u))
-    
-    print(f"Processo finalizado. Total de canais salvos: {total_encontrado}")
+    print(f"Processo finalizado. Total de canais capturados: {total_geral}")
 
 if __name__ == "__main__":
     get_channels()
