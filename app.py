@@ -3,108 +3,134 @@ import xml.etree.ElementTree as ET
 from flask import Flask, Response, redirect, request
 import os
 import time
+import uuid
 from datetime import datetime
 
 app = Flask(__name__)
 
-# Configurações de Domínio e Identificação
-BASE_URL = "https://ycineflix.tudo30.shop/wp-json/xui-pflix/v1"
+# Configurações do Portal
+BASE_SITE = "https://app.pobreflix2.site"
+API_BASE = f"{BASE_SITE}/wp-json/xui-pflix/v1"
+
 HEADERS = {
     "User-Agent": "okhttp/4.12.0",
     "X-Requested-With": "site.speedflix",
-    "Accept": "application/json"
+    "Accept": "application/json",
+    "Connection": "Keep-Alive"
 }
 
-def get_channels(server_id):
-    """Busca a lista de canais de um servidor específico."""
-    try:
-        # Tenta o endpoint de sincronização que é mais completo
-        url = f"{BASE_URL}/channels/sync"
-        params = {"server_id": server_id}
-        res = requests.get(url, params=params, headers=HEADERS, timeout=15)
+class SpeedSession:
+    def __init__(self):
+        self.token = None
+        self.device_id = str(uuid.uuid4()).replace('-', '')[:16]
+        self.last_login = 0
+
+    def login(self):
+        """Obtém ou renova o token de acesso Bearer."""
+        now = time.time()
+        if self.token and (now - self.last_login < 3000):
+            return self.token
+        try:
+            payload = {
+                "username": f"guest_{self.device_id[:8]}",
+                "password": "guest",
+                "device_id": self.device_id,
+                "model": "Samsung SM-G998B",
+                "version": "13"
+            }
+            # Tenta login via bypass de rota (rest_route) que é mais estável
+            r = requests.post(f"{BASE_SITE}/", params={"rest_route": "/xui-pflix/v1/auth/login"}, 
+                             json=payload, headers=HEADERS, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                self.token = data.get("data", {}).get("token") or data.get("token")
+                self.last_login = now
+                return self.token
+        except: pass
+        return None
+
+    def fetch(self, endpoint, params=None):
+        """Faz a requisição de dados com autorização."""
+        token = self.login()
+        h = HEADERS.copy()
+        if token: h["Authorization"] = f"Bearer {token}"
         
-        if res.status_code != 200:
-            # Fallback para o endpoint normal
-            url = f"{BASE_URL}/channels"
-            params = {"server_id": server_id, "per_page": 500}
-            res = requests.get(url, params=params, headers=HEADERS, timeout=15)
-            
-        if res.status_code == 200:
-            data = res.json()
-            return data.get("data", {}).get("items") or data.get("items") or []
-    except:
-        pass
-    return []
+        try:
+            p = {"rest_route": f"/xui-pflix/v1/{endpoint}", **(params or {})}
+            r = requests.get(f"{BASE_SITE}/", params=p, headers=h, timeout=15)
+            if r.status_code == 200: return r.json()
+        except: pass
+        return None
+
+speed_api = SpeedSession()
 
 @app.route("/")
 def index():
     h = request.host_url
-    return f"<h1>SpeedFlix Proxy</h1><p>Playlist: {h}playlist.m3u</p><p>EPG: {h}epg.xml</p>"
+    return f"<h1>SpeedFlix Master Proxy (Railway)</h1><p>Playlist: <b>{h}playlist.m3u</b><br>EPG: <b>{h}epg.xml</b></p>"
 
 @app.route("/playlist.m3u")
-def playlist():
-    """Gera a lista de canais unificada [S1, S2, S3]."""
-    host = request.host_url
+def m3u_route():
     m3u = ["#EXTM3U"]
-    
+    host = request.host_url
+    token = speed_api.login()
+    suffix = f"|User-Agent=okhttp/4.12.0&X-Requested-With=site.speedflix"
+    if token: suffix += f"&Authorization=Bearer {token}"
+
     for sid in [1, 2, 3]:
-        items = get_channels(sid)
-        for ch in items:
-            cid = ch.get("id")
-            if not cid: continue
+        # Pega até 2 páginas por servidor (aprox 200 canais cada)
+        for page in [1, 2]:
+            data = speed_api.fetch("channels", {"server_id": sid, "per_page": 100, "page": page})
+            if not data: break
+            items = data.get("data", {}).get("items") or data.get("items") or []
+            if not items: break
             
-            # Identificação no Nome e no Grupo
-            name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
-            group = f"{(ch.get('category_name') or 'Canais').upper()} [S{sid}]"
-            logo = ch.get("image") or ""
-            
-            m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{group}",{name}')
-            m3u.append(f"{host}stream/{sid}/{cid}")
-            
+            for ch in items:
+                cid = ch.get("id")
+                name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
+                cat = (ch.get('category_name') or 'Canais').upper()
+                logo = ch.get("image") or ""
+                m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{cat} [S{sid}]",{name}')
+                m3u.append(f"{host}stream/{sid}/{cid}{suffix}")
+            if len(items) < 100: break
     return Response("\n".join(m3u), mimetype="text/plain")
 
 @app.route("/epg.xml")
-def epg():
-    """Extrai apenas o EPG dos canais (Focado no Servidor 1 e 2)."""
+def epg_route():
+    """Gera o EPG separado dos canais."""
     tv = ET.Element("tv", generator_info_name="SpeedFlix-EPG")
-    
-    # Buscamos os canais para criar os IDs no XML
     for sid in [1, 2]:
-        channels = get_channels(sid)
-        for ch in channels[:50]: # Limite de 50 canais por servidor para o Render nao travar
-            cid = ch.get("id")
-            unique_id = f"s{sid}_{cid}"
-            
-            chan_elem = ET.SubElement(tv, "channel", id=unique_id)
-            ET.SubElement(chan_elem, "display-name").text = f"{ch.get('name')} [S{sid}]"
-            
-            # Busca a programação real
-            try:
-                e_url = f"{BASE_URL}/channels/{cid}/epg"
-                e_res = requests.get(e_url, params={"server_id": sid, "limit": 5}, headers=HEADERS, timeout=5)
-                if e_res.status_code == 200:
-                    listings = e_res.json().get("data", {}).get("epg", {}).get("epg_listings", [])
+        data = speed_api.fetch("channels", {"server_id": sid, "per_page": 40})
+        if data:
+            items = data.get("data", {}).get("items") or data.get("items") or []
+            for ch in items:
+                cid = ch.get("id")
+                uid = f"s{sid}_{cid}"
+                ET.SubElement(tv, "channel", id=uid).append(ET.Element("display-name"))
+                tv.find(f"channel[@id='{uid}']/display-name").text = f"{ch.get('name')} [S{sid}]"
+                
+                e_data = speed_api.fetch(f"channels/{cid}/epg", {"server_id": sid, "limit": 5})
+                if e_data:
+                    listings = e_data.get("data", {}).get("epg", {}).get("epg_listings", []) or []
                     for p in listings:
-                        start = datetime.fromtimestamp(int(p['start_timestamp'])).strftime("%Y%m%d%H%M%S +0000")
-                        stop = datetime.fromtimestamp(int(p['stop_timestamp'])).strftime("%Y%m%d%H%M%S +0000")
-                        prog = ET.SubElement(tv, "programme", start=start, stop=stop, channel=unique_id)
-                        ET.SubElement(prog, "title", lang="pt").text = p.get("title")
-            except: continue
-            
-    return Response(ET.tostring(tv, encoding="utf-8"), mimetype="application/xml")
+                        try:
+                            start = datetime.fromtimestamp(int(p['start_timestamp'])).strftime("%Y%m%d%H%M%S +0000")
+                            stop = datetime.fromtimestamp(int(p['stop_timestamp'])).strftime("%Y%m%d%H%M%S +0000")
+                            prog = ET.SubElement(tv, "programme", start=start, stop=stop, channel=uid)
+                            ET.SubElement(prog, "title", lang="pt").text = p.get("title")
+                        except: continue
+    return Response(ET.tostring(tv, encoding="utf-8", xml_declaration=True), mimetype="application/xml")
 
-@app.route("/stream/<int:sid>/<int:cid>")
-def stream(sid, cid):
-    """Gera o link de vídeo na hora do play."""
-    try:
-        url = f"{BASE_URL}/channels/{cid}/stream"
-        res = requests.get(url, params={"server_id": sid, "t": int(time.time())}, headers=HEADERS, timeout=10)
-        if res.status_code == 200:
-            v_url = res.json().get("data", {}).get("stream_url") or res.json().get("stream_url")
-            if v_url: return redirect(v_url)
-    except: pass
+@app.route("/stream/<int:sid>/<path:cid>")
+def stream_route(sid, cid):
+    clean_id = cid.split('|')[0].split('?')[0]
+    data = speed_api.fetch(f"channels/{clean_id}/stream", {"server_id": sid, "t": int(time.time())})
+    if data:
+        url = data.get("data", {}).get("stream_url") or data.get("stream_url")
+        if url: return redirect(url)
     return "Offline", 404
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
+    # O Railway usa a porta 8080 por padrão
+    port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
