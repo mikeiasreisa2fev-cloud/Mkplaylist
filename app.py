@@ -1,111 +1,128 @@
 import requests
-from flask import Flask, Response, request
+from bs4 import BeautifulSoup
+import xml.etree.ElementTree as ET
+from flask import Flask, Response, redirect, request
 import os
-import uuid
+import time
+from datetime import datetime
 
 app = Flask(__name__)
 
-# Configurações do Portal
-BASE_DOMAIN = "https://app.pobreflix2.site"
-USER_AGENT = "okhttp/4.12.0"
-APP_ID = "site.speedflix"
+# Links das paginas que voce enviou
+SERVER_PAGES = {
+    1: "https://app.pobreflix2.site/canais/?thema=1&server=speed-1",
+    2: "https://app.pobreflix2.site/canais/?thema=1&server=speed-2",
+    3: "https://app.pobreflix2.site/canais/?thema=1&server=speed-3"
+}
 
-class SpeedFlixAPI:
-    def __init__(self):
-        self.token = None
-        self.device_id = str(uuid.uuid4()).replace('-', '')[:16]
+# Headers de um navegador real para evitar o erro 403
+HEADERS_WEB = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Referer": "https://app.pobreflix2.site/",
+    "Accept-Language": "pt-BR,pt;q=0.9"
+}
 
-    def login(self):
-        """Tenta login de convidado via rest_route para burlar bloqueios."""
-        if self.token: return self.token
-        try:
-            url = f"{BASE_DOMAIN}/"
-            params = {"rest_route": "/xui-pflix/v1/auth/login"}
-            payload = {
-                "username": f"guest_{self.device_id[:8]}", 
-                "password": "guest", 
-                "device_id": self.device_id
-            }
-            r = requests.post(url, params=params, json=payload, headers={"User-Agent": USER_AGENT}, timeout=10)
-            if r.status_code == 200:
-                data = r.json()
-                self.token = data.get("data", {}).get("token") or data.get("token")
-                return self.token
-        except: pass
-        return None
-
-    def get_channels(self, sid):
-        """Busca canais usando a técnica rest_route."""
-        token = self.login()
-        url = f"{BASE_DOMAIN}/"
-        params = {
-            "rest_route": "/xui-pflix/v1/channels",
-            "server_id": sid,
-            "per_page": 200
-        }
-        headers = {"User-Agent": USER_AGENT}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-            
-        try:
-            r = requests.get(url, params=params, headers=headers, timeout=15)
-            if r.status_code == 200:
-                data = r.json()
-                # Extração flexível dos itens
-                return data.get("data", {}).get("items") or data.get("items") or []
-        except: pass
-        return []
-
-api = SpeedFlixAPI()
+def scrape_channels(sid):
+    """Entra no site e 'caça' os IDs e Nomes dos canais no código HTML."""
+    channels = []
+    try:
+        url = SERVER_PAGES.get(sid)
+        res = requests.get(url, headers=HEADERS_WEB, timeout=20)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
+            # No site do Pobreflix, os canais estao em links dentro de divs da classe 'item'
+            # Buscamos o padrao de link: /canais/ID/
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                if '/canais/' in href:
+                    cid = href.strip('/').split('/')[-1]
+                    if cid.isdigit():
+                        name = a.get('title') or a.text.strip()
+                        if not name: continue
+                        
+                        # Tenta pegar a imagem do canal
+                        img = a.find('img')
+                        logo = img['src'] if img and img.has_attr('src') else ""
+                        
+                        channels.append({
+                            "id": cid,
+                            "name": name.replace("Assistir ", ""),
+                            "logo": logo,
+                            "group": f"CANAIS [S{sid}]"
+                        })
+    except Exception as e:
+        print(f"Erro no servidor {sid}: {e}")
+    
+    # Remove duplicados
+    seen = set()
+    return [c for c in channels if not (c['id'] in seen or seen.add(c['id']))]
 
 @app.route("/")
 def index():
-    return f"<h1>SpeedFlix Proxy</h1><p>Playlist: {request.host_url}playlist.m3u</p>"
+    h = request.host_url
+    return f"<h1>SpeedFlix Master Proxy</h1><p>Playlist: {h}playlist.m3u</p><p>EPG: {h}epg.xml</p>"
 
 @app.route("/playlist.m3u")
 def playlist():
-    """Gera a playlist M3U unificada [S1, S2, S3]."""
     m3u = ["#EXTM3U"]
-    
-    token = api.login()
-    if not token:
-        m3u.append("# ERRO: Falha ao obter Token de Autorização.")
-    
-    # Headers que o TiviMate deve usar para abrir o link de vídeo
-    suffix = f"|User-Agent={USER_AGENT}&X-Requested-With={APP_ID}"
-    if token:
-        suffix += f"&Authorization=Bearer {token}"
-
+    host = request.host_url
     total = 0
+    
     for sid in [1, 2, 3]:
-        channels = api.get_channels(sid)
-        if not channels:
-            m3u.append(f"# INFO: Servidor {sid} não retornou canais na API.")
-            continue
-            
-        for ch in channels:
-            cid = ch.get("id")
-            if not cid: continue
-            
-            # Nome e Grupo identificados
-            name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
-            cat = (ch.get('category_name') or 'Canais').upper()
-            logo = ch.get("image") or ""
-            
-            m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{cat} [S{sid}]",{name}')
-            
-            # Link de vídeo direto via rest_route
-            # Isso pula o proxy da sua hospedagem e usa o servidor original do SpeedFlix
-            stream_url = f"{BASE_DOMAIN}/?rest_route=/xui-pflix/v1/channels/{cid}/stream&server_id={sid}"
-            m3u.append(f"{stream_url}{suffix}")
+        canals = scrape_channels(sid)
+        for ch in canals:
+            name = f"{ch['name']} [S{sid}]"
+            m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{ch["id"]}" tvg-logo="{ch["logo"]}" group-title="{ch["group"]}",{name}')
+            # Link de redirecionamento para o video
+            m3u.append(f"{host}stream/{sid}/{ch['id']}")
             total += 1
             
     if total == 0:
-        m3u.append("# ERRO: Todos os servidores retornaram lista vazia. O IP da sua hospedagem pode estar bloqueado.")
+        m3u.append("# ERRO: O site bloqueou o acesso do servidor (403).")
+        m3u.append("# Tente abrir o link da playlist no seu 4G para testar.")
         
     return Response("\n".join(m3u), mimetype="text/plain")
 
+@app.route("/stream/<int:sid>/<int:cid>")
+def stream(sid, cid):
+    """Busca o link real do m3u8 na hora de dar o play."""
+    try:
+        # A API de stream costuma ser mais aberta que a de lista
+        api_url = f"https://app.pobreflix2.site/wp-json/xui-pflix/v1/channels/{cid}/stream"
+        h = {"User-Agent": "okhttp/4.12.0", "X-Requested-With": "site.speedflix"}
+        r = requests.get(api_url, params={"server_id": sid, "t": int(time.time())}, headers=h, timeout=10)
+        if r.status_code == 200:
+            url = r.json().get("data", {}).get("stream_url") or r.json().get("stream_url")
+            if url: return redirect(url)
+    except: pass
+    return "Link Offline", 404
+
+@app.route("/epg.xml")
+def epg():
+    """Extrai o guia de programacao dos canais do servidor 1."""
+    tv = ET.Element("tv")
+    channels = scrape_channels(1)[:40] # Limite para nao travar o Railway
+    for ch in channels:
+        cid = ch['id']
+        c_elem = ET.SubElement(tv, "channel", id=f"s1_{cid}")
+        ET.SubElement(c_elem, "display-name").text = f"{ch['name']} [S1]"
+        
+        # Busca EPG real via API
+        try:
+            e_url = f"https://app.pobreflix2.site/wp-json/xui-pflix/v1/channels/{cid}/epg"
+            e_res = requests.get(e_url, params={"server_id": 1, "limit": 5}, headers={"User-Agent": "okhttp/4.12.0"}, timeout=5)
+            if e_res.status_code == 200:
+                listings = e_res.json().get("data", {}).get("epg", {}).get("epg_listings", [])
+                for p in listings:
+                    start = datetime.fromtimestamp(int(p['start_timestamp'])).strftime("%Y%m%d%H%M%S +0000")
+                    stop = datetime.fromtimestamp(int(p['stop_timestamp'])).strftime("%Y%m%d%H%M%S +0000")
+                    prog = ET.SubElement(tv, "programme", start=start, stop=stop, channel=f"s1_{cid}")
+                    ET.SubElement(prog, "title", lang="pt").text = p.get("title")
+        except: continue
+
+    return Response(ET.tostring(tv, encoding="utf-8"), mimetype="application/xml")
+
 if __name__ == "__main__":
-    # O Railway usa a porta 8080
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
