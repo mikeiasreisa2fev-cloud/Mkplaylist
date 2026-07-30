@@ -5,14 +5,15 @@ app = Flask(__name__)
 
 @app.route("/")
 def index():
-    return "<h1>SpeedFlix Master Proxy Online</h1>"
+    h = request.host_url
+    return f"<h1>SpeedFlix Proxy Ativo</h1><p>M3U: {h}playlist.m3u<br>EPG: {h}epg.xml</p>"
 
 @app.route("/playlist.m3u")
 def serve_m3u():
     if os.path.exists("playlist.m3u"):
         with open("playlist.m3u", "r", encoding="utf-8") as f:
             return Response(f.read(), mimetype="text/plain")
-    return "#EXTM3U\n# Erro: Lista nao gerada.", 200
+    return "#EXTM3U\n# Erro: Lista nao gerada. Rode o Action no GitHub.", 200
 
 @app.route("/epg.xml")
 def serve_epg():
