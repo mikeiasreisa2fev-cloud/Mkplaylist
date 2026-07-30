@@ -1,87 +1,87 @@
 import requests
-import uuid
 import json
+import uuid
 import time
-import random
+import re
+
+def fetch_via_proxy(url):
+    """Busca dados usando o proxy AllOrigins para esconder o IP do GitHub."""
+    proxy_url = f"https://api.allorigins.win/get?url={requests.utils.quote(url)}"
+    try:
+        r = requests.get(proxy_url, timeout=30)
+        if r.status_code == 200:
+            # O AllOrigins retorna o conteúdo original dentro da chave 'contents'
+            content = r.json().get('contents')
+            return json.loads(content)
+    except Exception as e:
+        print(f"Erro no Proxy ao acessar {url}: {e}")
+    return None
 
 def get_channels():
     m3u = ["#EXTM3U"]
-    # Domínios para tentativa
-    DOMAINS = ["https://app.pobreflix2.site", "https://ycineflix.tudo30.shop"]
-    
-    # Gerar um IP brasileiro falso para enganar o firewall
-    fake_ip = f"{random.choice([177, 179, 186, 187, 189, 191, 200, 201])}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(0,255)}"
+    # Domínio principal da API
+    BASE_API = "https://ycineflix.tudo30.shop/wp-json/xui-pflix/v1"
     
     device_id = str(uuid.uuid4()).replace('-', '')[:16]
-    headers_base = {
-        "User-Agent": "okhttp/4.12.0",
-        "X-Requested-With": "site.speedflix",
-        "X-Forwarded-For": fake_ip,
-        "Accept": "application/json"
-    }
 
-    session = requests.Session()
-    session.headers.update(headers_base)
+    print("--- Iniciando Captura via Proxy ---")
+    
+    # 1. Login de Convidado para obter o Token
+    print("Tentando realizar login via Proxy...")
+    login_url = f"{BASE_API}/auth/login?username=guest_{device_id[:6]}&password=guest&device_id={device_id}"
+    data_login = fetch_via_proxy(login_url)
+    
+    token = None
+    if data_login:
+        token = data_login.get("data", {}).get("token") or data_login.get("token")
+        print("Login realizado com sucesso via Proxy!")
+    else:
+        print("Aviso: Falha no login via Proxy, tentando buscar canais sem token...")
 
     total_geral = 0
-    
-    for base in DOMAINS:
-        print(f"Tentando capturar via {base}...")
-        token = None
-        try:
-            # 1. Login de Convidado via rest_route (Bypass de Firewall)
-            login_url = f"{base}/"
-            login_params = {"rest_route": "/xui-pflix/v1/auth/login"}
-            payload = {"username": f"guest_{device_id[:6]}", "password": "guest", "device_id": device_id}
-            
-            r_login = session.post(login_url, params=login_params, json=payload, timeout=15)
-            if r_login.status_code == 200:
-                token = r_login.json().get("data", {}).get("token") or r_login.json().get("token")
-                print("Login realizado com sucesso!")
-        except: pass
-
+    # 2. Percorrer os servidores 1, 2 e 3
+    for sid in [1, 2, 3]:
+        print(f"Buscando canais do Servidor {sid}...")
+        # Pedimos 500 canais para pegar tudo de uma vez
+        chan_url = f"{BASE_API}/channels?server_id={sid}&per_page=500"
         if token:
-            session.headers.update({"Authorization": f"Bearer {token}"})
-
-        # 2. Busca os canais (Servidores 1, 2 e 3)
-        for sid in [1, 2, 3]:
-            try:
-                # Técnica rest_route para canais
-                params = {"rest_route": "/xui-pflix/v1/channels", "server_id": sid, "per_page": 500}
-                r = session.get(f"{base}/", params=params, timeout=20)
-                
-                if r.status_code == 200:
-                    data = r.json()
-                    items = data.get("data", {}).get("items") or data.get("items") or []
-                    
-                    if items:
-                        print(f"S{sid}: Encontrados {len(items)} canais.")
-                        for ch in items:
-                            cid = ch.get("id")
-                            if not cid: continue
-                            
-                            name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
-                            cat = (ch.get('category_name') or f'SERVIDOR {sid}').upper()
-                            logo = ch.get("image") or ""
-                            
-                            m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{cat} [S{sid}]",{name}')
-                            # Link direto conforme as imagens que você mandou
-                            m3u.append(f"https://speed.megafilmeshd9.com/midia/speed-{sid}/{cid}.m3u8")
-                            total_geral += 1
-            except: continue
+            chan_url += f"&Authorization=Bearer {token}"
+            
+        data_chans = fetch_via_proxy(chan_url)
         
-        if total_geral > 0: break # Se conseguiu em um portal, não tenta o próximo
+        if data_chans:
+            items = data_chans.get("data", {}).get("items") or data_chans.get("items") or []
+            if items:
+                print(f"Sucesso! Encontrados {len(items)} canais no Servidor {sid}")
+                for ch in items:
+                    cid = ch.get("id")
+                    if not cid: continue
+                    
+                    # Identificação clara [S1], [S2] ou [S3]
+                    name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
+                    cat = (ch.get('category_name') or f'SERVIDOR {sid}').upper()
+                    logo = ch.get("image") or ""
+                    
+                    # Monta a linha do canal na lista M3U
+                    m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{cat} [S{sid}]",{name}')
+                    # Link direto para o vídeo m3u8 que descobrimos ser o mais estável
+                    m3u.append(f"https://speed.megafilmeshd9.com/midia/speed-{sid}/{cid}.m3u8")
+                    total_geral += 1
+            else:
+                print(f"Servidor {sid} retornou lista vazia através do Proxy.")
+        else:
+            print(f"Falha ao conectar no servidor {sid} via Proxy.")
 
-    # 3. Salva a lista
+    # 3. Salvar o arquivo final
     if total_geral > 0:
         with open("playlist.m3u", "w", encoding="utf-8") as f:
             f.write("\n".join(m3u))
-        print(f"Sucesso! {total_geral} canais salvos.")
+        print(f"--- SUCESSO: {total_geral} canais salvos em playlist.m3u ---")
     else:
-        print("Erro: Nenhum canal capturado.")
-        # Cria um arquivo com erro para você ver no Railway
+        print("ERRO CRÍTICO: Nenhum canal capturado.")
+        # Cria um arquivo com erro para facilitar o diagnóstico
         with open("playlist.m3u", "w", encoding="utf-8") as f:
-            f.write("#EXTM3U\n# ERRO: O servidor do SpeedFlix bloqueou o GitHub.\n# Verifique o log das Actions.")
+            f.write("#EXTM3U\n# ERRO: O Proxy não conseguiu capturar os canais.\n# Verifique o log das Actions no GitHub.")
 
 if __name__ == "__main__":
     get_channels()
