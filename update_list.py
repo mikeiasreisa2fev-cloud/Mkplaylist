@@ -1,94 +1,86 @@
 import requests
-import re
-from bs4 import BeautifulSoup
+import uuid
+import json
 import time
 
-def get_channels():
+def get_channels_from_app():
     m3u = ["#EXTM3U"]
-    base_url = "https://app.pobreflix2.site"
-    # Link alvo solicitado: categorias do Servidor 2
-    target_url = "https://app.pobreflix2.site/canais/categorias/?thema=1&server=speed-2"
-
+    # Domínio principal que fornece os dados para o aplicativo
+    BASE_API = "https://ycineflix.tudo30.shop/wp-json/xui-pflix/v1"
+    
+    # Simulação de um dispositivo Android real
+    device_id = str(uuid.uuid4()).replace('-', '')[:16]
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Referer": base_url
+        "User-Agent": "okhttp/4.12.0",
+        "X-Requested-With": "site.speedflix",
+        "Accept": "application/json"
     }
 
-    session = requests.Session()
-    session.headers.update(headers)
-
-    print(f"Iniciando captura das categorias: {target_url}")
-
+    print("--- Autenticando no Aplicativo SpeedFlix ---")
+    token = None
     try:
-        # 1. Acessa a página de categorias
-        res = session.get(target_url, timeout=20)
-        if res.status_code != 200:
-            print(f"Erro ao acessar o site: {res.status_code}")
-            return
+        # Faz o 'Login de Convidado' para abrir a porta do servidor
+        login_url = f"{BASE_API}/auth/login"
+        payload = {
+            "username": f"guest_{device_id[:6]}", 
+            "password": "guest", 
+            "device_id": device_id
+        }
+        r = requests.post(login_url, json=payload, headers=headers, timeout=15)
+        if r.status_code == 200:
+            token = r.json().get("data", {}).get("token") or r.json().get("token")
+            print("Autenticação realizada com sucesso!")
+    except:
+        print("Aviso: Falha no login, tentando captura direta...")
 
-        soup = BeautifulSoup(res.text, 'html.parser')
-        # Localiza os links de categorias (div.iptv-categoria-card a)
-        cat_links = soup.select(".iptv-categoria-card a")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
 
-        if not cat_links:
-            print("Nenhuma categoria encontrada. Verifique se o link ainda é válido.")
-            return
-
-        total_canais = 0
-        # 2. Percorre cada link de categoria encontrado
-        for cl in cat_links:
-            cat_name = cl.get_text(strip=True).upper()
-            cat_href = cl['href']
-            if cat_href.startswith('/'):
-                cat_href = base_url + cat_href
-
-            print(f"Lendo canais da categoria: {cat_name}")
-
-            try:
-                # 3. Entra na página da categoria para extrair os canais
-                res_ch = session.get(cat_href, timeout=20)
-                if res_ch.status_code == 200:
-                    soup_ch = BeautifulSoup(res_ch.text, 'html.parser')
-                    # Busca os cards de canais (a.iptv-card)
-                    chan_cards = soup_ch.find_all('a', class_='iptv-card')
-
-                    for card in chan_cards:
-                        c_href = card.get('href', '')
-                        # Extrai o ID do canal do link
-                        cid_match = re.search(r'/canais/(\d+)/', c_href)
-                        if not cid_match: continue
-                        cid = cid_match.group(1)
-
-                        # Extrai o nome do canal
-                        name_tag = card.find('span', class_='iptv-card-title')
-                        name = name_tag.get_text(strip=True) if name_tag else f"Canal {cid}"
-
-                        # Extrai a logo
-                        logo = ""
-                        img_tag = card.find('img')
-                        if img_tag:
-                            logo = img_tag.get('src') or img_tag.get('data-src') or ""
-
-                        # Monta a entrada M3U
-                        # Usando o padrão de servidor 2 e o link m3u8 direto confirmado
-                        m3u.append(f'#EXTINF:-1 tvg-id="s2_{cid}" tvg-logo="{logo}" group-title="{cat_name}",{name} [S2]')
-                        m3u.append(f"https://speed.megafilmeshd9.com/midia/speed-2/{cid}.m3u8")
+    total_canais = 0
+    # Servidores 1, 2 e 3
+    for sid in [1, 2, 3]:
+        print(f"Buscando Banco de Dados do Servidor {sid}...")
+        
+        # Pedimos 500 canais por servidor (para pegar os 176, 192 e 127 de uma vez)
+        url = f"{BASE_API}/channels"
+        params = {"server_id": sid, "per_page": 500}
+        
+        try:
+            res = requests.get(url, params=params, headers=headers, timeout=30)
+            if res.status_code == 200:
+                data = res.json()
+                # O XUI pode retornar em 'items' ou 'data.items'
+                items = data.get("data", {}).get("items") or data.get("items") or []
+                
+                if items:
+                    print(f"Sucesso! {len(items)} canais capturados no S{sid}")
+                    for ch in items:
+                        cid = ch.get("id")
+                        if not cid: continue
+                        
+                        # Nome, Categoria e Logo extraídos diretamente do app
+                        name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
+                        cat = (ch.get('category_name') or 'CANAIS').upper()
+                        logo = ch.get("image") or ""
+                        
+                        m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{cat} [S{sid}]",{name}')
+                        # Link direto para o vídeo m3u8 (o mais estável)
+                        m3u.append(f"https://speed.megafilmeshd9.com/midia/speed-{sid}/{cid}.m3u8")
                         total_canais += 1
+                else:
+                    print(f"Aviso: Servidor {sid} retornou lista vazia.")
+            else:
+                print(f"Erro {res.status_code} no Servidor {sid}")
+        except Exception as e:
+            print(f"Falha de conexão no S{sid}: {e}")
 
-                # Pequena pausa para não ser bloqueado por excesso de requisições
-                time.sleep(0.3)
-
-            except Exception as e:
-                print(f"Erro ao processar categoria {cat_name}: {e}")
-
-        # 4. Salva o resultado no arquivo M3U
+    # Salva o arquivo M3U no seu repositório
+    if total_canais > 0:
         with open("playlist.m3u", "w", encoding="utf-8") as f:
             f.write("\n".join(m3u))
-
-        print(f"\nConcluído! {total_canais} canais extraídos e salvos em 'playlist.m3u'.")
-
-    except Exception as e:
-        print(f"Ocorreu um erro geral: {e}")
+        print(f"--- PLAYLIST GERADA: {total_canais} canais salvos ---")
+    else:
+        print("ERRO: Não foi possível capturar os canais do app.")
 
 if __name__ == "__main__":
-    get_channels()
+    get_channels_from_app()
