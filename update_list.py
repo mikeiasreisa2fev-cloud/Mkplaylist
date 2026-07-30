@@ -2,85 +2,86 @@ import requests
 import uuid
 import json
 import time
+import random
 
-def get_channels_from_app():
+def get_channels():
     m3u = ["#EXTM3U"]
-    # Domínio principal que fornece os dados para o aplicativo
-    BASE_API = "https://ycineflix.tudo30.shop/wp-json/xui-pflix/v1"
+    # Domínios para tentativa
+    DOMAINS = ["https://app.pobreflix2.site", "https://ycineflix.tudo30.shop"]
     
-    # Simulação de um dispositivo Android real
+    # Gerar um IP brasileiro falso para enganar o firewall
+    fake_ip = f"{random.choice([177, 179, 186, 187, 189, 191, 200, 201])}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(0,255)}"
+    
     device_id = str(uuid.uuid4()).replace('-', '')[:16]
-    headers = {
+    headers_base = {
         "User-Agent": "okhttp/4.12.0",
         "X-Requested-With": "site.speedflix",
+        "X-Forwarded-For": fake_ip,
         "Accept": "application/json"
     }
 
-    print("--- Autenticando no Aplicativo SpeedFlix ---")
-    token = None
-    try:
-        # Faz o 'Login de Convidado' para abrir a porta do servidor
-        login_url = f"{BASE_API}/auth/login"
-        payload = {
-            "username": f"guest_{device_id[:6]}", 
-            "password": "guest", 
-            "device_id": device_id
-        }
-        r = requests.post(login_url, json=payload, headers=headers, timeout=15)
-        if r.status_code == 200:
-            token = r.json().get("data", {}).get("token") or r.json().get("token")
-            print("Autenticação realizada com sucesso!")
-    except:
-        print("Aviso: Falha no login, tentando captura direta...")
+    session = requests.Session()
+    session.headers.update(headers_base)
 
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    total_canais = 0
-    # Servidores 1, 2 e 3
-    for sid in [1, 2, 3]:
-        print(f"Buscando Banco de Dados do Servidor {sid}...")
-        
-        # Pedimos 500 canais por servidor (para pegar os 176, 192 e 127 de uma vez)
-        url = f"{BASE_API}/channels"
-        params = {"server_id": sid, "per_page": 500}
-        
+    total_geral = 0
+    
+    for base in DOMAINS:
+        print(f"Tentando capturar via {base}...")
+        token = None
         try:
-            res = requests.get(url, params=params, headers=headers, timeout=30)
-            if res.status_code == 200:
-                data = res.json()
-                # O XUI pode retornar em 'items' ou 'data.items'
-                items = data.get("data", {}).get("items") or data.get("items") or []
-                
-                if items:
-                    print(f"Sucesso! {len(items)} canais capturados no S{sid}")
-                    for ch in items:
-                        cid = ch.get("id")
-                        if not cid: continue
-                        
-                        # Nome, Categoria e Logo extraídos diretamente do app
-                        name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
-                        cat = (ch.get('category_name') or 'CANAIS').upper()
-                        logo = ch.get("image") or ""
-                        
-                        m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{cat} [S{sid}]",{name}')
-                        # Link direto para o vídeo m3u8 (o mais estável)
-                        m3u.append(f"https://speed.megafilmeshd9.com/midia/speed-{sid}/{cid}.m3u8")
-                        total_canais += 1
-                else:
-                    print(f"Aviso: Servidor {sid} retornou lista vazia.")
-            else:
-                print(f"Erro {res.status_code} no Servidor {sid}")
-        except Exception as e:
-            print(f"Falha de conexão no S{sid}: {e}")
+            # 1. Login de Convidado via rest_route (Bypass de Firewall)
+            login_url = f"{base}/"
+            login_params = {"rest_route": "/xui-pflix/v1/auth/login"}
+            payload = {"username": f"guest_{device_id[:6]}", "password": "guest", "device_id": device_id}
+            
+            r_login = session.post(login_url, params=login_params, json=payload, timeout=15)
+            if r_login.status_code == 200:
+                token = r_login.json().get("data", {}).get("token") or r_login.json().get("token")
+                print("Login realizado com sucesso!")
+        except: pass
 
-    # Salva o arquivo M3U no seu repositório
-    if total_canais > 0:
+        if token:
+            session.headers.update({"Authorization": f"Bearer {token}"})
+
+        # 2. Busca os canais (Servidores 1, 2 e 3)
+        for sid in [1, 2, 3]:
+            try:
+                # Técnica rest_route para canais
+                params = {"rest_route": "/xui-pflix/v1/channels", "server_id": sid, "per_page": 500}
+                r = session.get(f"{base}/", params=params, timeout=20)
+                
+                if r.status_code == 200:
+                    data = r.json()
+                    items = data.get("data", {}).get("items") or data.get("items") or []
+                    
+                    if items:
+                        print(f"S{sid}: Encontrados {len(items)} canais.")
+                        for ch in items:
+                            cid = ch.get("id")
+                            if not cid: continue
+                            
+                            name = f"{ch.get('name') or ch.get('title')} [S{sid}]"
+                            cat = (ch.get('category_name') or f'SERVIDOR {sid}').upper()
+                            logo = ch.get("image") or ""
+                            
+                            m3u.append(f'#EXTINF:-1 tvg-id="s{sid}_{cid}" tvg-logo="{logo}" group-title="{cat} [S{sid}]",{name}')
+                            # Link direto conforme as imagens que você mandou
+                            m3u.append(f"https://speed.megafilmeshd9.com/midia/speed-{sid}/{cid}.m3u8")
+                            total_geral += 1
+            except: continue
+        
+        if total_geral > 0: break # Se conseguiu em um portal, não tenta o próximo
+
+    # 3. Salva a lista
+    if total_geral > 0:
         with open("playlist.m3u", "w", encoding="utf-8") as f:
             f.write("\n".join(m3u))
-        print(f"--- PLAYLIST GERADA: {total_canais} canais salvos ---")
+        print(f"Sucesso! {total_geral} canais salvos.")
     else:
-        print("ERRO: Não foi possível capturar os canais do app.")
+        print("Erro: Nenhum canal capturado.")
+        # Cria um arquivo com erro para você ver no Railway
+        with open("playlist.m3u", "w", encoding="utf-8") as f:
+            f.write("#EXTM3U\n# ERRO: O servidor do SpeedFlix bloqueou o GitHub.\n# Verifique o log das Actions.")
 
 if __name__ == "__main__":
-    get_channels_from_app()
+    get_channels()
