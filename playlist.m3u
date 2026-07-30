@@ -1,2 +1,13 @@
 #EXTM3U
-# ERRO: Servidor bloqueou a captura no GitHub.
+#EXTINF:-1 tvg-id="s1_11892477" group-title="CANAIS [S1]",Globo AC - Amazonica Rio Branco FHD [S1]
+https://speed.megafilmeshd9.com/midia/speed-1/11892477.m3u8|User-Agent=okhttp/4.12.0&Referer=https://app.pobreflix2.site/
+#EXTINF:-1 tvg-id="s1_11892478" group-title="CANAIS [S1]",Globo AC - Amazonica Rio Branco HD [S1]
+https://speed.megafilmeshd9.com/midia/speed-1/11892478.m3u8|User-Agent=okhttp/4.12.0&Referer=https://app.pobreflix2.site/
+#EXTINF:-1 tvg-id="s1_11892479" group-title="CANAIS [S1]",Globo AC - Amazonica Rio Branco SD [S1]
+https://speed.megafilmeshd9.com/midia/speed-1/11892479.m3u8|User-Agent=okhttp/4.12.0&Referer=https://app.pobreflix2.site/
+#EXTINF:-1 tvg-id="s1_11892480" group-title="CANAIS [S1]",Globo AL - Gazeta de Alagoas FHD [S1]
+https://speed.megafilmeshd9.com/midia/speed-1/11892480.m3u8|User-Agent=okhttp/4.12.0&Referer=https://app.pobreflix2.site/
+#EXTINF:-1 tvg-id="s1_11892481" group-title="CANAIS [S1]",Globo AL - Gazeta de Alagoas HD [S1]
+https://speed.megafilmeshd9.com/midia/speed-1/11892481.m3u8|User-Agent=okhttp/4.12.0&Referer=https://app.pobreflix2.site/
+#EXTINF:-1 tvg-id="s1_11892482" group-title="CANAIS [S1]",Globo AL - Gazeta de Alagoas SD [S1]
+https://speed.megafilmeshd9.com/midia/speed-1/11892482.m3u8|User-Agent=okhttp/4.12.0&Referer=https://app.pobreflix2.site/
