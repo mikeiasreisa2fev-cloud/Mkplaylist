@@ -6,7 +6,7 @@ import time
 
 def get_all_data():
     m3u = ["#EXTM3U"]
-    tv = ET.Element("tv", generator_info_name="SpeedFlix-Master-v15")
+    tv = ET.Element("tv", generator_info_name="SpeedFlix-Extractor-AllPages")
     
     base_url = "https://app.pobreflix2.site"
     ajax_url = f"{base_url}/wp-admin/admin-ajax.php"
@@ -20,7 +20,7 @@ def get_all_data():
     session = requests.Session()
     session.headers.update(headers)
 
-    print("Validando sessão (app_check_status)...")
+    print("Validando sessão (Handshake)...")
     try:
         session.get(base_url, timeout=15)
         session.post(ajax_url, data={"action": "app_check_status"}, timeout=10)
@@ -29,65 +29,65 @@ def get_all_data():
     total_canais = 0
     # Percorre os servidores 1, 2 e 3
     for sid in [1, 2, 3]:
-        cat_page = f"{base_url}/canais/categorias/?thema=1&server=speed-{sid}"
-        print(f"--- Mapeando Servidor {sid} ---")
+        print(f"--- Iniciando Varredura no Servidor {sid} ---")
         
-        try:
-            res_cat = session.get(cat_page, timeout=20)
-            if res_cat.status_code != 200: continue
+        # Varre até 60 páginas por servidor conforme solicitado
+        for page in range(1, 61):
+            url = f"{base_url}/canais/page/{page}/?thema=1&server=speed-{sid}"
+            print(f"Lendo S{sid} - Página {page}...")
             
-            soup_cat = BeautifulSoup(res_cat.text, 'html.parser')
-            # Busca links de categorias (/canais/categorias/ID)
-            cat_links = soup_cat.find_all('a', href=re.compile(r'/canais/categorias/'))
-            
-            for cl in cat_links:
-                cat_name = cl.get_text(strip=True).upper()
-                if not cat_name or len(cat_name) < 3: continue
+            try:
+                res = session.get(url, timeout=25)
+                if res.status_code != 200: break
                 
-                cat_href = cl['href']
-                if cat_href.startswith('/'): cat_href = base_url + cat_href
+                soup = BeautifulSoup(res.text, 'html.parser')
+                chan_cards = soup.find_all('a', class_='iptv-card')
                 
-                print(f"Lendo categoria: {cat_name}")
+                if not chan_cards:
+                    print(f"Fim das páginas para S{sid} na página {page}.")
+                    break
                 
-                res_ch = session.get(cat_href, timeout=20)
-                if res_ch.status_code == 200:
-                    soup_ch = BeautifulSoup(res_ch.text, 'html.parser')
-                    chan_cards = soup_ch.find_all('a', class_='iptv-card')
+                count_page = 0
+                for card in chan_cards:
+                    c_href = card.get('href', '')
+                    cid_match = re.search(r'/canais/(\d+)/', c_href)
+                    if not cid_match: continue
+                    cid = cid_match.group(1)
                     
-                    for card in chan_cards:
-                        c_href = card.get('href', '')
-                        cid_match = re.search(r'/canais/(\d+)/', c_href)
-                        if not cid_match: continue
-                        cid = cid_match.group(1)
-                        
-                        name_tag = card.find('span', class_='iptv-card-title')
-                        name = name_tag.get_text(strip=True) if name_tag else f"Canal {cid}"
-                        
-                        uid = f"s{sid}_{cid}"
-                        display_name = f"{name} [S{sid}]"
-                        group_name = f"{cat_name} [S{sid}]"
+                    name_tag = card.find('span', class_='iptv-card-title')
+                    name = name_tag.get_text(strip=True) if name_tag else f"Canal {cid}"
+                    
+                    logo = ""
+                    img_tag = card.find('img')
+                    if img_tag: logo = img_tag.get('src') or img_tag.get('data-src') or ""
 
-                        # Adiciona ao M3U
-                        m3u.append(f'#EXTINF:-1 tvg-id="{uid}" group-title="{group_name}",{display_name}')
-                        m3u.append(f"https://speed.megafilmeshd9.com/midia/speed-{sid}/{cid}.m3u8")
-                        
-                        # Adiciona ao EPG (Base)
-                        chan_elem = ET.SubElement(tv, "channel", id=uid)
-                        ET.SubElement(chan_elem, "display-name").text = display_name
-                        
-                        total_canais += 1
-                time.sleep(0.3)
-        except Exception as e:
-            print(f"Erro no Servidor {sid}: {e}")
+                    uid = f"s{sid}_{cid}"
+                    display_name = f"{name} [S{sid}]"
+                    group_name = f"CANAIS [S{sid}]"
 
-    # Salva os arquivos finais
+                    # M3U - Link direto SEM os cabeçalhos que travavam a reprodução
+                    m3u.append(f'#EXTINF:-1 tvg-id="{uid}" tvg-logo="{logo}" group-title="{group_name}",{display_name}')
+                    m3u.append(f"https://speed.megafilmeshd9.com/midia/speed-{sid}/{cid}.m3u8")
+                    
+                    # EPG Base
+                    c_elem = ET.SubElement(tv, "channel", id=uid)
+                    ET.SubElement(c_elem, "display-name").text = display_name
+                    
+                    count_page += 1
+                    total_canais += 1
+                
+                if count_page == 0: break
+                time.sleep(0.3) # Pausa para evitar bloqueio
+                
+            except: break
+
+    # Salva os arquivos no repositório GitHub
     with open("playlist.m3u", "w", encoding="utf-8") as f:
         f.write("\n".join(m3u))
 
     tree = ET.ElementTree(tv)
     tree.write("epg.xml", encoding="utf-8", xml_declaration=True)
-    
-    print(f"Sucesso! {total_canais} canais salvos.")
+    print(f"--- SUCESSO TOTAL: {total_canais} canais extraídos ---")
 
 if __name__ == "__main__":
     get_all_data()
